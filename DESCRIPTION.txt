@@ -1,0 +1,17 @@
+Package: cascade-core
+Type: Package
+Title: Cross-scale Allocation Solver for Constrained Area Downscaling & Economics
+Version: 0.1.0
+Author: LAMASUS Team
+Maintainer: The LAMASUS Team <maintainer@example.com>
+Description: Core algorithms for downscaling aggregate thematic totals (e.g. Land Use, Population) to high-resolution continuous geographic fields using iterative proportional fitting and cross-entropy optimization.
+License: MIT + file LICENSE
+Encoding: UTF-8
+LazyData: true
+RoxygenNote: 7.2.3
+Imports:
+    data.table,
+    cli,
+    terra,
+    Rcpp
+LinkingTo: Rcpp
