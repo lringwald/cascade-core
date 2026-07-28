@@ -40,13 +40,6 @@ downscale_pop <- function(targets,
   # ----------------------------------------------------------------------------
   # Setup: convert to data.table, source auxiliary code
   # ----------------------------------------------------------------------------
-  source("codes/downscalr-dt/R/aux_func.R")
-  source("codes/downscalr-dt/R/optim_aux_func.R")
-  source("codes/downscalr-dt/R/biascorr_aux_func.R")
-  source("codes/downscalr-dt/R/solve_biascorr_unified.R")
-  source("codes/downscalr-dt/R/areas_update.R")
-  source("codes/downscalr-dt/R/xmat_update.R")
- 
   message("⚙️  Starting preprocessing...")
   # Ensure data.tables
   targets      <- if (!is.data.table(targets)) as.data.table(targets) else targets
@@ -56,51 +49,51 @@ downscale_pop <- function(targets,
   priors       <- if (!is.null(priors) && !is.data.table(priors)) as.data.table(priors) else priors
   restrictions <- if (!is.null(restrictions) && !is.data.table(restrictions)) as.data.table(restrictions) else restrictions
   xmat_proj    <- if (!is.null(xmat_proj) && !is.data.table(xmat_proj)) as.data.table(xmat_proj) else xmat_proj
-  
+
   # ----------------------------------------------------------------------------
   # Input completion / checks
   # ----------------------------------------------------------------------------
   targets   <- complete_targets_pop(targets)
-  
+
   # if (is.null(start_grid)) {
   #   # We may allow implicit start_grid based on priors
   #   start_grid <- compute_default_start_pop(targets, priors)
   # }
   start_grid <- complete_start_grid_pop(start_grid,targets)
-  
+
   if (is.null(xmat)) {
     xmat <- data.table(ns = unique(start_grid$ns),
                        ks = PLCHOLD_K,
                        value = 0)
   }
-  
+
   xmat <- complete_xmat(xmat, start_grid)
-  
+
   if (is.null(betas)) {
     betas <- data.table(pop_type = PLCHOLD_POPT,
                         ks = unique(xmat$ks),
                         value = 0)
   }
-  
+
   betas <- complete_betas_pop(betas)
-  
+
   xmat_coltypes <- complete_xmat_coltypes(xmat_coltypes, xmat)
   if (!is.null(xmat_proj)) xmat_proj <- complete_xmat_proj(xmat_proj)
   if (!is.null(priors)) priors <- complete_priors_pop(priors, xmat, targets)
   if (!is.null(restrictions)) restrictions <- complete_restrictions_pop(restrictions, xmat, targets)
-  
+
   err_check_inputs_pop(
-    targets, 
-    xmat, 
+    targets,
+    xmat,
     betas,
-    xmat_coltypes, 
+    xmat_coltypes,
     xmat_proj,
-    xmat_dyn_fun, 
-    priors, 
-    restrictions, 
+    xmat_dyn_fun,
+    priors,
+    restrictions,
     options$err.txt
   )
-  
+
   # ----------------------------------------------------------------------------
   # Identify which ks are “projected” or “dynamic”
   # ----------------------------------------------------------------------------
@@ -112,7 +105,7 @@ downscale_pop <- function(targets,
   if (any(xmat_coltypes$value == "dynamic")) {
     dyn_colnames <- xmat_coltypes[value == "dynamic"]$ks
   }
-  
+
   # ----------------------------------------------------------------------------
   # Iteration over times
   # ----------------------------------------------------------------------------
@@ -128,9 +121,9 @@ downscale_pop <- function(targets,
     format = " {pb_spin} {pb_bar} {pb_percent} | ETA: {pb_eta} | Step {pb_current}/{pb_total} | {pb_elapsed} | Time: {curr_time}",
     format_done = "{pb_spin} LSU Optimization complete in {pb_elapsed}."
   )
-  
+
   for (curr_time in times) {
-    
+
     # Solve (currently only bias‑correcting Poisson or similar method)
     if (options$solve_fun == "solve_biascorr") {
       curr_opts <- options
@@ -149,7 +142,7 @@ downscale_pop <- function(targets,
     } else {
       stop("Other solve_fun methods not yet implemented in downscale_pop")
     }
-    
+
     # Update projected xmat (if any)
     if (!is.null(xmat_proj) && length(proj_colnames) > 0) {
       tmp_proj <- xmat_proj[times == curr_time]
@@ -163,7 +156,7 @@ downscale_pop <- function(targets,
       curr_xmat[tmp_dyn[ks %in% dyn_colnames], on = .(ns, ks),
                 value := fifelse(!is.na(dyn), dyn, value)]
     }
-    
+
     # Append results
     res_dt <- cbind(times = curr_time, res$out_res)
     if (!exists("out_res")) {
@@ -176,11 +169,11 @@ downscale_pop <- function(targets,
   }
   cli_progress_done(id = pb)
   # End time loop
-  
+
   # Drop placeholder levels / dummy pop_types
   out_res <- out_res[pop_type != PLCHOLD_POPT]
   if (any(out_res$times == PLCHOLD_T)) out_res[, times := NULL]
-  
+
   return(list(
     out_res   = out_res,
     out_solver = out_solver,
