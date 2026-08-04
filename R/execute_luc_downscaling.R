@@ -449,8 +449,8 @@ for (iter in seq_len(nrow(ds_grid))) {
     setnames(tt_res_flat, "value", "flat_value")
     
     # Join full model results with flat prior results
-    tt_res_impact <- temp_res$out_res[value != 0 | temp_res_flat$out_res$value != 0]
-    tt_res_impact <- merge(tt_res_impact, tt_res_flat, by = c("times", "ns", "from_class", "to_class"), all = TRUE)
+    tt_res_model <- temp_res$out_res[value != 0]
+    tt_res_impact <- merge(tt_res_model, tt_res_flat, by = c("times", "ns", "from_class", "to_class"), all = TRUE)
     tt_res_impact[is.na(value), value := 0]
     tt_res_impact[is.na(flat_value), flat_value := 0]
     
@@ -556,11 +556,15 @@ for (iter in seq_len(nrow(ds_grid))) {
       max_pixel_area <- res_km^2
       conservation[, area_exceeds_max := ds_total > (max_pixel_area + 0.01)]
       conservation[, area_lower_max := ds_total < (max_pixel_area - 0.01)]
-      
-      n_exceeded <- sum(conservation$area_exceeds_max, na.rm = TRUE)
+      exceeded_dt <- conservation[area_exceeds_max == TRUE]
+      n_exceeded <- nrow(exceeded_dt)
       n_lower <- sum(conservation$area_lower_max, na.rm = TRUE)
       if (n_exceeded > 0) {
-        cli_alert_danger(sprintf("CRITICAL: %d pixels in %s exceed the theoretical max pixel area of %.1f km²!", n_exceeded, temp_Ns, max_pixel_area))
+        exceed_diff <- exceeded_dt$ds_total - max_pixel_area
+        max_ex <- max(exceed_diff, na.rm = TRUE)
+        mean_ex <- mean(exceed_diff, na.rm = TRUE)
+        severity <- if (max_ex < 0.1) "minor numerical inaccuracy" else "substantial excess"
+        cli_alert_danger(sprintf("CRITICAL: %d pixels in %s exceed theoretical max pixel area of %.1f km²! Exceedance: Max +%.4f km², Mean +%.4f km² (%s).", n_exceeded, temp_Ns, max_pixel_area, max_ex, mean_ex, severity))
       }
       if (n_lower > 0) {
         cli_alert_info(sprintf("Info: %d pixels in %s have area lower than %.1f km² (likely coastal/border pixels).", n_lower, temp_Ns, max_pixel_area))

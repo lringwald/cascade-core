@@ -9,6 +9,7 @@ optim_pop_allocation <-     function(targets = NULL,
                                      current_pop = NULL,
                                      current_lu_to = NULL,
                                      options = list()) {
+  pixel_avail <- as.character(pixel_avail)
   # ---- 0. Helper: build base nloptr options ----
   make_nloptr_opts <- function(options) {
     list(
@@ -58,14 +59,14 @@ optim_pop_allocation <-     function(targets = NULL,
         ub = res$upper_bounds,
         opts = res$options,
         mu0 = priors_sub,
-        grid = grid_sub,
         targets = targets_sub,
         restrictions = restrictions_sub,
         cutoff = options$cutoff,
         count_lb = options$count_lb_cutoff,
         count_ub = options$count_ub_cutoff,
         lambda = options$pen_lambda,
-        log_scale = options$optimize_log_scale
+        log_scale = options$optimize_log_scale,
+        tempering = 1.0
       )
       
       nloptr_out$message <- paste0(sprintf("Adaptive try %d\n", current_try), nloptr_out$message)
@@ -97,7 +98,6 @@ optim_pop_allocation <-     function(targets = NULL,
       ub = ub_single,
       opts = res_main_bounds$options,
       mu0 = priors[pixel_avail, tname, drop = FALSE],
-      grid = as.matrix(res_grid[pixel_avail, , drop = FALSE]),
       targets = error_target_val,
       restrictions = if (!is.null(restrictions))
         restrictions[pixel_avail, tname, drop = FALSE] else NULL,
@@ -105,7 +105,8 @@ optim_pop_allocation <-     function(targets = NULL,
       count_lb = options$count_lb_cutoff,
       count_ub = options$count_ub_cutoff,
       lambda = options$pen_lambda,
-      log_scale = options$optimize_log_scale
+      log_scale = options$optimize_log_scale,
+      tempering = 1.0
     )
     
     nloptr_out$message <- paste0("Boosted target: ", tname, "\n", nloptr_out$message)
@@ -225,15 +226,16 @@ optim_pop_allocation <-     function(targets = NULL,
       
       solver_runs[[paste0("boost_", tname)]] <- res_single
       
-      curr_out_mu <-   allocate_poisson(res_single$solution,
-                                        priors[pixel_avail, , drop = FALSE],
-                                        restrictions[pixel_avail, , drop = FALSE],
-                                        options$cutoff,
-                                        count_lb = options$count_lb_cutoff,
-                                        count_ub = options$count_ub_cutoff
-                                        )
+      curr_out_mu <- allocate_poisson(res_single$solution,
+                                      priors[pixel_avail, tname, drop = FALSE],
+                                      if (!is.null(restrictions)) restrictions[pixel_avail, tname, drop = FALSE] else NULL,
+                                      options$cutoff,
+                                      count_lb = options$count_lb_cutoff,
+                                      count_ub = options$count_ub_cutoff,
+                                      log_scale = options$optimize_log_scale
+                                      )
       
-      out_mu[pixel_avail, tname] <- curr_out_mu[pixel_avail, , drop = TRUE]
+      out_mu[pixel_avail, tname] <- curr_out_mu[pixel_avail, tname]
     }
   }
   

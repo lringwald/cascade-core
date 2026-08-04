@@ -1,10 +1,10 @@
 # ===============================================================
-# solve_biascorr.R
+# solve_biascorr_lu.R
 # ===============================================================
 library(data.table)
 library(nloptr)
 # Main solver: fully data.table optimized
-solve_biascorr     <- function(targets,
+solve_biascorr_lu     <- function(targets,
                                areas,
                                xmat,
                                betas, 

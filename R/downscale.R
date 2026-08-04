@@ -134,7 +134,7 @@ downscale <- function(targets,
     curr_options$err.txt = paste0(curr_time, " ", curr_options$err.txt)
 
     if (options$solve_fun == "solve_biascorr") {
-      res = solve_biascorr(
+      res = solve_biascorr_unified(
         type = "lu",
         targets = targets, 
         areas = curr_areas, 

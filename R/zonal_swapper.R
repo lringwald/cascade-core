@@ -31,14 +31,7 @@ library(data.table)
 library(cli)
 library(Rcpp)
 
-tryCatch({
-  Rcpp::sourceCpp("codes/dominance_swapper.cpp")
-}, error = function(e) {
-  cli::cli_alert_warning(sprintf("Rcpp cache error: %s. Bypassing corrupted cache with an isolated directory...", e$message))
-  isolated_cache <- file.path(tempdir(), "Rcpp_isolated_cache")
-  dir.create(isolated_cache, showWarnings = FALSE)
-  Rcpp::sourceCpp("codes/dominance_swapper.cpp", cacheDir = isolated_cache)
-})
+# Rcpp functions are now compiled into the package namespace natively.
 
 #' Spatial Constraint Enforcement via Zonal Swapping
 #'

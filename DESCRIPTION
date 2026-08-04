@@ -1,4 +1,4 @@
-Package: cascade-core
+Package: cascadecore
 Type: Package
 Title: Cross-scale Allocation Solver for Constrained Area Downscaling & Economics
 Version: 0.1.0
