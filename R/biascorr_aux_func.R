@@ -484,8 +484,15 @@ run_single_nloptr_phase <- function(master_out_mu, curr_sol, x0, active_targets,
       ), temp_alloc_args))
       
       if (options$optimize_log_scale) temp_mu <- exp(temp_mu)
-      phase_mu[pixel_avail, tname] <- as.vector(temp_mu)
+      temp_mu_vec <- as.vector(temp_mu)
+      phase_mu[pixel_avail, tname] <- temp_mu_vec
       curr_sol[[tname]] <- res_single$solution 
+      
+      # IMPORTANT: Deduct the newly allocated area so the next target in the loop 
+      # doesn't overallocate the same land (only applies to land use).
+      if (type == "lu") {
+        active_areas <- pmax(active_areas - temp_mu_vec, 0)
+      }
     }
   }
   
