@@ -433,7 +433,7 @@ for (iter in seq_len(nrow(ds_grid))) {
     betas_region <- .resolve_region_betas(betas_full, temp_Ns, country_col, temp_country)
     
     # 1. Filter betas to active triplets BEFORE injecting KS
-    active_beta_pairs <- unique(temp_targets[, .(from_class, to_class)])
+    active_beta_pairs <- unique(temp_targets[from_class != to_class & value > 0, .(from_class, to_class)])
     if (nrow(active_beta_pairs) > 0 && nrow(betas_region) > 0) {
       if ("from_class" %in% names(betas_region)) {
         betas_region <- betas_region[active_beta_pairs, on = .(from_class, to_class), nomatch = 0L]
@@ -442,6 +442,26 @@ for (iter in seq_len(nrow(ds_grid))) {
       }
     } else {
       betas_region <- betas_region[0]
+    }
+    
+    # 1.5 Inject neutral (zero) betas for active demanded target transitions missing from betas & priors
+    covered_pairs <- if (nrow(betas_region) > 0) unique(betas_region[, .(from_class, to_class)]) else data.table(from_class = character(), to_class = character())
+    if (!is.null(priors_region) && nrow(priors_region) > 0) {
+      covered_pairs <- unique(rbind(covered_pairs, unique(priors_region[, .(from_class, to_class)])))
+    }
+    missing_target_pairs <- active_beta_pairs[!covered_pairs, on = .(from_class, to_class)]
+    if (nrow(missing_target_pairs) > 0) {
+      all_ks <- unique(xmat_region$ks)
+      if (length(all_ks) == 0) all_ks <- "intercept"
+      neutral_betas <- missing_target_pairs[CJ(from_class = missing_target_pairs$from_class, ks = all_ks), on = .(from_class), allow.cartesian = TRUE]
+      neutral_betas <- unique(neutral_betas)
+      neutral_betas[, value := 0]
+      if ("value_q025" %in% names(betas_region)) neutral_betas[, value_q025 := 0]
+      if ("value_q975" %in% names(betas_region)) neutral_betas[, value_q975 := 0]
+      if ("pooled" %in% names(betas_region)) neutral_betas[, pooled := FALSE]
+      if (!is.null(country_col) && country_col %in% names(betas_region)) neutral_betas[, (country_col) := temp_country[1]]
+      betas_region <- rbind(betas_region, neutral_betas, fill = TRUE)
+      message(">>> Injected neutral (zero) betas for ", nrow(missing_target_pairs), " target transitions lacking econometric models in region ", temp_Ns)
     }
     
     # 2. Add missing KS for this region safely
@@ -453,6 +473,7 @@ for (iter in seq_len(nrow(ds_grid))) {
        new_betas_reg[, value := 0]
        if ("value_q025" %in% names(betas_region)) new_betas_reg[, value_q025 := 0]
        if ("value_q975" %in% names(betas_region)) new_betas_reg[, value_q975 := 0]
+       if ("pooled" %in% names(betas_region)) new_betas_reg[, pooled := FALSE]
        betas_region <- rbind(betas_region, new_betas_reg, fill=TRUE)
        message(">>> Injected ", length(missing_region_ks), " missing covariates locally for region ", temp_Ns)
     }

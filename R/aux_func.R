@@ -253,7 +253,7 @@ complete_betas <- function(betas) {
   
   betas <- standardize_factors(betas)
   setkey(betas, from_class, to_class, ks)
-  return(na.omit(betas))
+  return(na.omit(betas, cols = intersect(names(betas), c("from_class", "to_class", "ks", "value"))))
 }
 
 #' Complete Input Betas for Population Downscaling
