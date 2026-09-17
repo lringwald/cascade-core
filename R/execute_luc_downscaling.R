@@ -432,6 +432,59 @@ for (iter in seq_len(nrow(ds_grid))) {
     # .resolve_region_betas). Only if nothing matches at all do we hand over every beta.
     betas_region <- .resolve_region_betas(betas_full, temp_Ns, country_col, temp_country)
     
+    # 0.5 Taxonomy Aliasing / Inheritance for unmodeled target classes
+    # If targets demand classes that have mapped parents in betas (e.g. Forests_managed -> Forests,
+    # Natural_unmanaged -> Natural_unmanaged_{fallow, set_aside, other}), clone parent model parameters
+    if (nrow(betas_region) > 0 && "from_class" %in% names(betas_region) && "to_class" %in% names(betas_region)) {
+      target_classes <- unique(c(as.character(temp_targets$from_class), as.character(temp_targets$to_class)))
+      beta_classes <- unique(c(as.character(betas_region$from_class), as.character(betas_region$to_class)))
+      
+      alias_map <- c(
+        Forests                     = "Forests_managed",
+        Natural_unmanaged_fallow    = "Natural_unmanaged",
+        Natural_unmanaged_set_aside = "Natural_unmanaged",
+        Natural_unmanaged_other     = "Natural_unmanaged"
+      )
+      needed_aliases <- alias_map[names(alias_map) %in% target_classes & !names(alias_map) %in% beta_classes & alias_map %in% beta_classes]
+      
+      if (length(needed_aliases) > 0) {
+        new_chunks <- list()
+        for (alias_cls in names(needed_aliases)) {
+          parent_cls <- needed_aliases[[alias_cls]]
+          m_to <- betas_region[to_class == parent_cls]
+          if (nrow(m_to) > 0) {
+            c_to <- copy(m_to)
+            c_to[, to_class := alias_cls]
+            new_chunks[[paste0("to_", alias_cls)]] <- c_to
+          }
+          m_from <- betas_region[from_class == parent_cls]
+          if (nrow(m_from) > 0) {
+            c_from <- copy(m_from)
+            c_from[, from_class := alias_cls]
+            new_chunks[[paste0("from_", alias_cls)]] <- c_from
+          }
+        }
+        for (from_alias in names(needed_aliases)) {
+          from_parent <- needed_aliases[[from_alias]]
+          for (to_alias in names(needed_aliases)) {
+            to_parent <- needed_aliases[[to_alias]]
+            m_both <- betas_region[from_class == from_parent & to_class == to_parent]
+            if (nrow(m_both) > 0) {
+              c_both <- copy(m_both)
+              c_both[, from_class := from_alias]
+              c_both[, to_class := to_alias]
+              new_chunks[[paste0("both_", from_alias, "_", to_alias)]] <- c_both
+            }
+          }
+        }
+        if (length(new_chunks) > 0) {
+          betas_region <- rbindlist(c(list(betas_region), new_chunks), use.names = TRUE, fill = TRUE)
+          betas_region <- unique(betas_region, by = intersect(names(betas_region), c("from_class", "to_class", "ks")))
+          message(">>> Inherited econometric betas for ", length(needed_aliases), " target classes (", paste(names(needed_aliases), collapse = ", "), ") in region ", temp_Ns)
+        }
+      }
+    }
+    
     # 1. Filter betas to active triplets BEFORE injecting KS
     active_beta_pairs <- unique(temp_targets[from_class != to_class & value > 0, .(from_class, to_class)])
     if (nrow(active_beta_pairs) > 0 && nrow(betas_region) > 0) {
