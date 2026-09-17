@@ -31,6 +31,7 @@ downscale <- function(targets,
                       times = NULL,
                       xmat = NULL,
                       betas = NULL,
+                      predict_model = NULL,
                       areas_update_fun = areas_sum_to,
                       xmat_coltypes = NULL,
                       xmat_proj = NULL,
@@ -86,8 +87,12 @@ downscale <- function(targets,
   
   xmat_coltypes = complete_xmat_coltypes(xmat_coltypes, xmat)
   
-  if (!is.null(priors)) priors = complete_priors(priors, xmat, targets)
-  if (!is.null(restrictions)) restrictions = complete_restrictions(restrictions, xmat, targets)
+  if (!is.null(priors)) {
+    if (nrow(priors) == 0) priors <- NULL else priors = complete_priors(priors, xmat, targets)
+  }
+  if (!is.null(restrictions)) {
+    if (nrow(restrictions) == 0) restrictions <- NULL else restrictions = complete_restrictions(restrictions, xmat, targets)
+  }
   if (!is.null(xmat_proj)) xmat_proj = complete_xmat_proj(xmat_proj)
   
   # 4. Final Validation
@@ -140,6 +145,7 @@ downscale <- function(targets,
         areas = curr_areas, 
         xmat = curr_xmat, 
         betas = betas, 
+        predict_model = predict_model,
         priors = priors, 
         restrictions = restrictions,
         timestep = curr_time, 

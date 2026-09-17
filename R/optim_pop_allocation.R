@@ -85,7 +85,7 @@ optim_pop_allocation <-     function(targets = NULL,
   
   # ---- 2. Helper: single-target fallback (boost) ----
   boost_target <- function(tname, error_target_val, res_grid, res_main_bounds, opts_base) {
-    x0_single <- x0[[tname]]
+    x0_single <- if (options$optimize_log_scale) log(pmax(x0[[tname]], 1e-12)) else x0[[tname]]
     lb_single <- res_main_bounds$lower_bounds[[tname]]
     ub_single <- res_main_bounds$upper_bounds[[tname]]
     
@@ -182,9 +182,18 @@ optim_pop_allocation <-     function(targets = NULL,
   ub <- pmax(res_main$solution,x0) * 10
   names(lb) <- names(ub) <- names(x0)
   
+  init_sol_nloptr <- res_main$solution
+  x0_nloptr <- x0
+  if (options$optimize_log_scale) {
+      init_sol_nloptr <- log(pmax(init_sol_nloptr, 1e-12))
+      x0_nloptr <- log(pmax(x0_nloptr, 1e-12))
+      lb <- log(pmax(lb, 1e-12))
+      ub <- log(pmax(ub, 1e-12))
+  }
+  
   adaptive_res <- adaptive_nloptr(
-    initial_solution = res_main$solution,
-    x0 = x0,
+    initial_solution = init_sol_nloptr,
+    x0 = x0_nloptr,
     lb = lb,
     ub = ub,
     opts_base = opts_base,
@@ -197,7 +206,12 @@ optim_pop_allocation <-     function(targets = NULL,
   res_main_final <- adaptive_res$final
   solver_runs[["main"]] <- c(list(adaptive_summary = res_main_final), adaptive_res$runs)
   
-  out_mu <- allocate_poisson(res_main_final$solution,
+  final_x_linear <- res_main_final$solution
+  if (options$optimize_log_scale) {
+      final_x_linear <- exp(final_x_linear)
+  }
+  
+  out_mu <- allocate_poisson(final_x_linear,
                              priors[pixel_avail, , drop = FALSE],
                              restrictions[pixel_avail, , drop = FALSE],
                              options$cutoff,
@@ -226,13 +240,13 @@ optim_pop_allocation <-     function(targets = NULL,
       
       solver_runs[[paste0("boost_", tname)]] <- res_single
       
-      curr_out_mu <- allocate_poisson(res_single$solution,
+      boost_sol_linear <- if (options$optimize_log_scale) exp(res_single$solution) else res_single$solution
+      curr_out_mu <- allocate_poisson(boost_sol_linear,
                                       priors[pixel_avail, tname, drop = FALSE],
                                       if (!is.null(restrictions)) restrictions[pixel_avail, tname, drop = FALSE] else NULL,
                                       options$cutoff,
                                       count_lb = options$count_lb_cutoff,
-                                      count_ub = options$count_ub_cutoff,
-                                      log_scale = options$optimize_log_scale
+                                      count_ub = options$count_ub_cutoff
                                       )
       
       out_mu[pixel_avail, tname] <- curr_out_mu[pixel_avail, tname]
@@ -244,7 +258,7 @@ optim_pop_allocation <-     function(targets = NULL,
                                   res_main_final$message)
   
   list(
-    solution = res_main_final$solution,
+    solution = final_x_linear,
     out_mu = out_mu,
     solver_runs = solver_runs,
     message = res_main_final$message
@@ -285,27 +299,35 @@ count_ipf_fit <- function(x0 = NULL, mu0, targets, restrictions = NULL,
   # ---- 2. Iteration Loop ----
   while (current_iter < max_iter && error_change > tolerance) {
     if (log_scale) {
-      mu_current <- allocate_poisson(x, mu0, restrictions, cutoff, count_lb, count_ub, log_scale=TRUE)
+      mu_current <- allocate_poisson(log(x), mu0, restrictions, cutoff, count_lb, count_ub, log_scale=TRUE)
       # max_c <- apply(mu_current,2,max) 
       # log_pred <- max_c + log(colSums(exp(sweep(mu_current,2,max_c,"-"))))
       log_pred <- matrixStats::colLogSumExps(mu_current)
       # Log-space update (with damping)
       delta_logx <- damping * (log_targ - log_pred)
+      
+      # Handle infinite or NA in delta_logx (e.g. if log_pred is -Inf)
+      delta_logx[!is.finite(delta_logx)] <- 0
+      
       x_new <- x * exp(delta_logx)
       # Convergence metric: max relative log-change
-      error_change <- max(abs(delta_logx))
+      error_change <- max(abs(delta_logx), na.rm = TRUE)
       x <- x_new
       
     } else {
-      mu_current <- allocate_poisson(x, mu0, grid, restrictions, cutoff, count_lb, count_ub, log_scale=FALSE)
+      mu_current <- allocate_poisson(x, mu0, restrictions, cutoff, count_lb, count_ub, log_scale=FALSE)
       
       # Linear-space update
       pred <- colSums(mu_current)
       ratio <- targets / pmax(pred, 1e-12)  # avoid division by zero
+      
+      # Handle infinite or NA in ratio
+      ratio[!is.finite(ratio)] <- 1
+      
       x_new <- x * (ratio ^ damping)
       
       # Convergence metric: max relative change
-      error_change <- max(abs(log(x_new / pmax(x, 1e-12))))
+      error_change <- max(abs(log(x_new / pmax(x, 1e-12))), na.rm = TRUE)
       x <- pmax(x_new, 1e-12)  # avoid negative/zero values
     }
     

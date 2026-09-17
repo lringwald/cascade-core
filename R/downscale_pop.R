@@ -79,8 +79,12 @@ downscale_pop <- function(targets,
 
   xmat_coltypes <- complete_xmat_coltypes(xmat_coltypes, xmat)
   if (!is.null(xmat_proj)) xmat_proj <- complete_xmat_proj(xmat_proj)
-  if (!is.null(priors)) priors <- complete_priors_pop(priors, xmat, targets)
-  if (!is.null(restrictions)) restrictions <- complete_restrictions_pop(restrictions, xmat, targets)
+  if (!is.null(priors)) {
+    if (nrow(priors) == 0) priors <- NULL else priors <- complete_priors_pop(priors, xmat, targets)
+  }
+  if (!is.null(restrictions)) {
+    if (nrow(restrictions) == 0) restrictions <- NULL else restrictions <- complete_restrictions_pop(restrictions, xmat, targets)
+  }
 
   err_check_inputs_pop(
     targets,

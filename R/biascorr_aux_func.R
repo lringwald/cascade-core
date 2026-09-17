@@ -459,9 +459,12 @@ run_single_nloptr_phase <- function(master_out_mu, curr_sol, x0, active_targets,
       curr_ub <- res_main_final$upper_bounds[[tname]]
       x0_single <- pmax(pmin(x0[[tname]], curr_ub - 1e-6), curr_lb + 1e-6) 
       
+      # Cap the target sequentially to the remaining available area to prevent dead ends
+      seq_target <- min(active_targets[[tname]], max_possible_area * (1 - 1e-9))
+      
       boost_call_args <- list(
         x0 = x0_single, lb = curr_lb, ub = curr_ub, opts = res_main_final$options, 
-        targets = active_targets[[tname]], mu0 = priors[pixel_avail, tname, drop = FALSE],
+        targets = seq_target, mu0 = priors[pixel_avail, tname, drop = FALSE],
         eval_f = boost_opts_base$objective, eval_grad_f = boost_opts_base$gradient,
         restrictions = if (!is.null(restrictions)) restrictions[pixel_avail, tname, drop = FALSE] else NULL,
         cutoff = options$cutoff, lambda = options$pen_lambda, log_scale = options$optimize_log_scale

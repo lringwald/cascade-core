@@ -8,6 +8,7 @@ solve_biascorr_lu     <- function(targets,
                                areas,
                                xmat,
                                betas, 
+                               predict_model = NULL,
                                priors = NULL, 
                                restrictions = NULL, 
                                timestep = NULL,
@@ -221,7 +222,28 @@ solve_biascorr_lu     <- function(targets,
     overlap_priors_cols <- intersect(mnl_priors_cols,exo_priors_cols)
     
     
-    if(p_mnl > 0 && !is.null(curr_betas)) {
+    if(!is.null(predict_model)) {
+      # --- DYNAMIC S4 PREDICTION PATH ---
+      pred_cols <- curr_lu_to
+      curr_priors_mu_hat <- matrix(0, n, length(pred_cols))
+      rownames(curr_priors_mu_hat) <- ns_avail
+      colnames(curr_priors_mu_hat) <- pred_cols
+      
+      # Pass matrix directly to avoid data.frame coercion overhead in the tight loop
+      pred_val <- predict(predict_model, newdata = curr_xmat[ns_avail, , drop = FALSE])
+      if (is.matrix(pred_val) || is.data.frame(pred_val)) {
+        match_cols <- intersect(colnames(pred_val), pred_cols)
+        if (length(match_cols) > 0) curr_priors_mu_hat[, match_cols] <- as.matrix(pred_val)[, match_cols]
+      } else {
+        # If vector, assume single target broadcast
+        curr_priors_mu_hat[] <- pred_val
+      }
+      
+      curr_priors_mu_hat[] <- pmin(curr_priors_mu_hat, options$MAX_EXP)
+      curr_priors_mu_hat[] <- pmax(curr_priors_mu_hat, log(options$MIN_EXP))
+      
+      scale_mnl_utility_exp <- if (length(curr_priors_mu_hat) > 0) mean(exp(curr_priors_mu_hat), na.rm = TRUE) else 1
+    } else if(p_mnl > 0 && !is.null(curr_betas)) {
       curr_priors_mu_hat <- matrix(0, n, p_mnl)
       rownames(curr_priors_mu_hat) <- ns_avail
       colnames(curr_priors_mu_hat) <- mnl_priors_cols
@@ -310,7 +332,6 @@ solve_biascorr_lu     <- function(targets,
     # --- 5. Feasibility Checks (Diagnostics) ---
     total_targets <- sum(curr_targets_vec)
     total_area    <- sum(curr_areas_vec)
-    rebalance_active <- isTRUE(options$rebalance_targets) && (total_targets > total_area) && (total_targets > 0)
     
     # Global insufficient area flag
     insufficient_area <- (total_targets > total_area + 1e-9)
@@ -325,9 +346,17 @@ solve_biascorr_lu     <- function(targets,
         allowed_area <- sum(curr_areas_vec * (1 - curr_restr_mat[, tname]))
         if (allowed_area < curr_targets_vec[tname] - 1e-9) {
           restriction_blocking[tname] <- TRUE
+          if (isTRUE(options$rebalance_targets)) {
+             curr_targets_vec[tname] <- allowed_area * (1 - 1e-9)
+             cli_alert_warning("Target ({round(curr_targets_vec[tname],2)}) exceeds allowed area ({round(allowed_area,2)}) due to restrictions for '{tname}'. Capping target.")
+          }
         }
       }
     }
+    
+    # Recalculate total_targets as they may have been capped by restrictions
+    total_targets <- sum(curr_targets_vec)
+    rebalance_active <- isTRUE(options$rebalance_targets) && (total_targets > total_area) && (total_targets > 0)
     
     if (rebalance_active) {
       # Scale targets down proportionally to match total_area

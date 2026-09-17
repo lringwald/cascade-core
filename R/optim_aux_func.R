@@ -109,14 +109,15 @@ allocate_poisson <- function(x, mu0 = NULL,
       log_lb <- log(count_lb)
       log_lambda[log_lambda < log_lb] <- -Inf
     }
-    if (any(count_ub < Inf)) {
+    if (any(count_ub < Inf, na.rm = TRUE)) {
       # The upper bound is a common bound across all classes in the pixel
       # Sum across classes (in log space)
       log_row_sums <- matrixStats::rowLogSumExps(log_lambda)
       over_cap <- log_row_sums > log(count_ub)
+      over_cap[is.na(over_cap)] <- FALSE
       if (any(over_cap)) {
         sub_count_ub <- if (length(count_ub) > 1) count_ub[over_cap] else count_ub
-        # Scale down proportionally: new_log_lambda = log_lambda - log_row_sums + log(count_ub)
+        # Scale down proportionally: new_log_lambda = log_lambda - log_row_sums + log(sub_count_ub)
         log_lambda[over_cap, ] <- sweep(log_lambda[over_cap, , drop = FALSE], 1, log_row_sums[over_cap] - log(sub_count_ub), "-")
       }
     }
@@ -134,10 +135,11 @@ allocate_poisson <- function(x, mu0 = NULL,
     
     if (cutoff > 0) lambda[lambda < cutoff] <- 0
     if (count_lb > 0) lambda[lambda < count_lb] <- 0
-    if (any(count_ub < Inf)) {
+    if (any(count_ub < Inf, na.rm = TRUE)) {
       # The upper bound is a common bound across all classes in the pixel
       row_sums <- rowSums(lambda)
       over_cap <- row_sums > count_ub
+      over_cap[is.na(over_cap)] <- FALSE
       if (any(over_cap)) {
         sub_count_ub <- if (length(count_ub) > 1) count_ub[over_cap] else count_ub
         # Scale down proportionally

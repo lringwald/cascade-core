@@ -27,6 +27,7 @@ solve_biascorr_unified <- function(type = c("lu", "pop"),
                                    grid = NULL,
                                    xmat = NULL,
                                    betas = NULL,
+                                   predict_model = NULL,
                                    priors = NULL,
                                    restrictions = NULL,
                                    timestep = NULL,
@@ -35,7 +36,7 @@ solve_biascorr_unified <- function(type = c("lu", "pop"),
   
   if (type == "lu") {
     # Dispatch to the Land-Use specific orchestrator
-    return(solve_biascorr_lu(targets, areas, xmat, betas, priors, restrictions, timestep, type, options))
+    return(solve_biascorr_lu(targets, areas, xmat, betas, predict_model, priors, restrictions, timestep, type, options))
     
   } else if (type == "pop") {
     # Dispatch to Population specific orchestrator

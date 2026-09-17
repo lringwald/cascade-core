@@ -62,6 +62,7 @@ allocate_transitions_spatial <- function(pixel_dt,
                                          block_pixels  = 4,
                                          gravity_reach = 2,
                                          gravity_floor = 0.05,
+                                         rare_area_km2 = 0,
                                          ipf_iter      = 50,
                                          ipf_tol       = 1e-9) {
 
@@ -246,7 +247,15 @@ allocate_transitions_spatial <- function(pixel_dt,
       }, numeric(npix))
       S_shr <- matrix(S_shr, nrow = npix)
 
-      M <- (G + gravity_floor) * (S_shr + 1e-6)
+      # For rare classes (tiny area in this zone), the target-share smoothing
+      # field creates artificial stripes at zone borders because the Gaussian
+      # gradient dominates the near-zero gravity signal. Skip S_shr modulation
+      # and fall back to pure gravity + floor for these cases.
+      if (rare_area_km2 > 0 && ctot < rare_area_km2) {
+        M <- G + gravity_floor
+      } else {
+        M <- (G + gravity_floor) * (S_shr + 1e-6)
+      }
 
       for (it in seq_len(ipf_iter)) {
         M  <- M * (r / rowSums(M))

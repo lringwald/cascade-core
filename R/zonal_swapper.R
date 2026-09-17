@@ -91,10 +91,15 @@ execute_zonal_swaps <- function(dt,
     }
     dt_internal[, noise_rem := fifelse(is_noisy, val, 0)]
   } else {
+    calc_noise <- function(v, th) {
+      rem <- v %% th
+      # handle floating point precision (e.g. 0.02 %% 0.01 = 0.009999999)
+      fifelse(rem > th - 1e-9 | rem < 1e-9, 0, rem)
+    }
     dt_internal[, noise_rem := if (!is.null(allowed_classes)) {
-      fifelse(class_id %in% allowed_classes, val %% threshold, 0)
+      fifelse(class_id %in% allowed_classes, calc_noise(val, threshold), 0)
     } else {
-      val %% threshold
+      calc_noise(val, threshold)
     }]
   }
   dt_internal[, clean_val := val - noise_rem]

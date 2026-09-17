@@ -28,6 +28,84 @@ require(progress)
 #'
 #' @return A `data.table` containing the fully downscaled land use transition trajectories.
 #' @export
+# ---------------------------------------------------------------------------
+# Which betas apply to one region?
+# ---------------------------------------------------------------------------
+# Resolution order, most specific first:
+#   1. `.REGION_ID.`  the betas are already keyed at the solver's own region level  -> exact match
+#   2. `country_col`  the betas are keyed by country and the grid knows the region's country
+#   3. HIERARCHICAL   the betas are keyed at some COARSER level of the same code scheme, so the
+#                     longest key that PREFIXES the region id wins: region "DE11" takes "DE11" if
+#                     present, else "DE1", else "DE".
+#   4. give up        no key matches -> every beta, which is the historical behaviour
+#
+# WHY 3 EXISTS. A prior fitted with country random effects is keyed by country (CAPRI 2-char),
+# while the solver splits on CAPRI_NUTS regions. Neither 1 nor 2 fires -- the betas carry no
+# `.REGION_ID.` and no `country_col` -- so every region silently received the coefficients of ALL
+# countries at once. That is not a loud failure: the solve still runs and still produces a map.
+#
+# WHY IT IS SAFE FOR OTHER MODELS. This branch is only reached when 1 and 2 both miss, so a model
+# with a 1:1 region keying (or a country column, as GLOBIOM has) never enters it and is bit-for-bit
+# unaffected. A model whose codes are not hierarchical finds no prefix and falls through to 4,
+# exactly as before. It can only ever turn "pool everything" into "use the most specific match".
+#
+# The longest-prefix winner is unique by construction: two DISTINCT keys of equal length cannot
+# both prefix the same string, so there is no tie to break and no ordering dependence.
+#
+# Matching is case-sensitive and purely positional, which suits NUTS/CAPRI-style codes where the
+# hierarchy is carried in the leading characters. It is NOT suitable for name-based keys
+# ("Austria"), but those come in through branch 2.
+.resolve_region_betas <- function(betas_full, region_id, country_col = NULL, temp_country = NULL,
+                                  key_col = NULL) {
+  if (is.null(betas_full) || !nrow(betas_full)) return(betas_full)
+
+  # 1. already keyed at region level
+  if (".REGION_ID." %in% names(betas_full)) return(betas_full[.REGION_ID. == region_id])
+
+  # 2. keyed by country, and we know this region's country
+  if (!is.null(country_col) && country_col %in% names(betas_full) && !is.null(temp_country)) {
+    return(betas_full[get(country_col) %in% temp_country])
+  }
+
+  # 3. keyed at a coarser level of the same scheme -> longest prefix of the region id
+  kc <- key_col
+  if (is.null(kc)) {
+    cand <- c(getOption("cascade.beta_key_col", NULL), "group", "Ns_reg", "region", "country")
+    cand <- cand[!vapply(cand, is.null, logical(1))]
+    kc <- intersect(cand, names(betas_full))
+    kc <- if (length(kc)) kc[1] else NULL
+  }
+  rid <- as.character(region_id)[1]
+  if (!is.null(kc) && !is.na(rid) && nzchar(rid)) {
+    keys <- unique(as.character(betas_full[[kc]]))
+    keys <- keys[!is.na(keys) & nzchar(keys)]
+    hits <- keys[startsWith(rid, keys)]
+    if (length(hits)) {
+      best <- hits[which.max(nchar(hits))]
+      if (!isTRUE(.cascade_beta_state$announced)) {
+        .cascade_beta_state$announced <- TRUE
+        message(sprintf(">>> betas: no region/country key on the betas; resolving hierarchically on `%s` (e.g. region %s -> %s). Reported once per session.",
+                        kc, rid, best))
+      }
+      return(betas_full[get(kc) == best])
+    }
+  }
+
+  # 4. nothing matched
+  if (!isTRUE(.cascade_beta_state$warned)) {
+    .cascade_beta_state$warned <- TRUE
+    warning(sprintf("betas carry no key matching region '%s' (looked for `.REGION_ID.`, `%s`%s) -- EVERY beta is being applied to EVERY region. Reported once per session.",
+                    rid, if (is.null(country_col)) "country_col" else country_col,
+                    if (is.null(kc)) "" else sprintf(", and prefixes of `%s`", kc)),
+            call. = FALSE, immediate. = TRUE)
+  }
+  betas_full
+}
+
+# Once-per-session reporting flags, so the region loop does not emit one line per region.
+.cascade_beta_state <- new.env(parent = emptyenv())
+
+
 execute_luc_downscaling <- function(
   targets,
   start_map,
@@ -41,7 +119,7 @@ execute_luc_downscaling <- function(
   region_cols = "Ns_reg",
   scen_cols = "scenario",
   time_col = "times",
-  country_col = "GLOB_country",
+  country_col = "Ns_reg",
   pixel_id_col = "ns",
   from_col = "from_class",
   to_col = "to_class",
@@ -143,7 +221,7 @@ execute_luc_downscaling <- function(
     priors <- priors[, ..keep_cols_priors]
   } else {
     priors <- data.table(ns=character(), from_class=character(), to_class=character(), times=character(), .SCEN_ID.=character(), value=numeric())
-    priors[, (country_col) := character()]
+    if (!is.null(country_col)) priors[, (country_col) := character()]
   }
 
   if (!is.null(restrictions)) {
@@ -152,7 +230,7 @@ execute_luc_downscaling <- function(
     restrictions <- restrictions[, ..keep_cols_restr]
   } else {
     restrictions <- data.table(ns=character(), to_class=character(), times=character(), .SCEN_ID.=character(), value=numeric())
-    restrictions[, (country_col) := character()]
+    if (!is.null(country_col)) restrictions[, (country_col) := character()]
   }
 
 # ---------------------------------------------------------------
@@ -160,7 +238,7 @@ execute_luc_downscaling <- function(
 # ---------------------------------------------------------------
 if (!is.null(scen_filter))    targets <- targets[.SCEN_ID. %in% scen_filter]
 if (!is.null(year_filter))    targets <- targets[times %in% as.character(c(base_year_val, year_filter))]
-if (!is.null(country_filter)) targets <- targets[get(country_col) %in% country_filter]
+if (!is.null(country_filter) && !is.null(country_col) && country_col %in% names(targets)) targets <- targets[get(country_col) %in% country_filter]
 
 # Protect against data.table NA-split crashes
 if (!is.null(xmat_full)) xmat_full <- xmat_full[!is.na(.REGION_ID.)]
@@ -271,7 +349,7 @@ for (iter in seq_len(nrow(ds_grid))) {
 
 
   # 3.2 Prepare Priors for Region
-  temp_country <- unique(temp_grid[[country_col]])
+  temp_country <- if (!is.null(country_col) && country_col %in% names(temp_grid)) unique(temp_grid[[country_col]]) else NULL
   temp_grid_cols <- intersect(c("ns", country_col, "GLOB_LUID", "GLOB_AEZ", "GLOB_altitude", "GLOB_slope", "GLOB_soil"), names(temp_grid))
   temp_grid_ns <- unique(temp_grid[, ..temp_grid_cols])
   # Integrity check before joining priors
@@ -280,7 +358,11 @@ for (iter in seq_len(nrow(ds_grid))) {
   }
 
 
-  priors_region <- temp_priors[get(country_col) %in% temp_country]
+  if (!is.null(country_col) && country_col %in% names(temp_priors)) {
+    priors_region <- temp_priors[get(country_col) %in% temp_country]
+  } else {
+    priors_region <- temp_priors
+  }
   # Pre-filter priors by active transition triplets in targets to prevent many-to-many Cartesian join explosion
   active_triplets <- unique(temp_targets[, .(times, from_class, to_class)])
   priors_region <- priors_region[active_triplets, on = .(times, from_class, to_class), nomatch = 0L]
@@ -300,13 +382,19 @@ for (iter in seq_len(nrow(ds_grid))) {
   }
 
   # 3.3 Prepare Restrictions for Region
-  restrict_region <- temp_restrict[get(country_col) %in% temp_country]
+  if (!is.null(country_col) && country_col %in% names(temp_restrict)) {
+    restrict_region <- temp_restrict[get(country_col) %in% temp_country]
+  } else {
+    restrict_region <- temp_restrict
+  }
   # Pre-filter restrictions by active target to_classes to prevent Cartesian join explosion
   restrict_region <- restrict_region[to_class %in% unique(temp_targets$to_class)]
   spatial_keys_restrict <- intersect(c("ns", country_col, "GLOB_LUID", "GLOB_AEZ", "GLOB_altitude", "GLOB_slope", "GLOB_soil"), names(restrict_region))
   spatial_keys_restrict <- intersect(spatial_keys_restrict, names(temp_grid_ns))
   restrict_region <- restrict_region[temp_grid_ns, on = spatial_keys_restrict, allow.cartesian = TRUE, nomatch = 0]
-  restrict_region <- restrict_region[, .(value = suppressWarnings(max(value, na.rm = TRUE))), by = .(ns, to_class, times)]
+  
+  by_cols <- intersect(names(restrict_region), c("ns", "from_class", "to_class", "times"))
+  restrict_region <- restrict_region[, .(value = suppressWarnings(max(value, na.rm = TRUE))), by = by_cols]
   
   # 3.3.5 Prepare xmat and betas for Region
   if (!is.null(xmat_split) && !is.null(betas_full)) {
@@ -339,14 +427,10 @@ for (iter in seq_len(nrow(ds_grid))) {
       NULL
     }
     
-    # Subset betas if they are region-specific
-    betas_region <- if (".REGION_ID." %in% names(betas_full)) {
-      betas_full[.REGION_ID. == temp_Ns]
-    } else if (country_col %in% names(betas_full)) {
-      betas_full[get(country_col) %in% temp_country]
-    } else {
-      betas_full
-    }
+    # Subset betas if they are region-specific. Exact keys first; then the hierarchical
+    # fallback, which is what lets a country-keyed prior serve finer regions (see
+    # .resolve_region_betas). Only if nothing matches at all do we hand over every beta.
+    betas_region <- .resolve_region_betas(betas_full, temp_Ns, country_col, temp_country)
     
     # 1. Filter betas to active triplets BEFORE injecting KS
     active_beta_pairs <- unique(temp_targets[, .(from_class, to_class)])
@@ -404,7 +488,7 @@ for (iter in seq_len(nrow(ds_grid))) {
   
   # 3.4 Call Optimization Engine (downscalr)
   temp_res <- downscale(
-    targets       = temp_targets[from_class != to_class],
+    targets       = temp_targets[from_class != to_class & value > 0],
     start_areas   = temp_start_map,
     restrictions  = restrict_region,
     priors        = priors_region,
@@ -429,7 +513,7 @@ for (iter in seq_len(nrow(ds_grid))) {
     
     # Run the exact same optimization but with no priors and no xmat
     temp_res_flat <- downscale(
-      targets       = temp_targets[from_class != to_class],
+      targets       = temp_targets[from_class != to_class & value > 0],
       start_areas   = temp_start_map,
       restrictions  = restrict_region,
       priors        = NULL,
@@ -512,7 +596,11 @@ for (iter in seq_len(nrow(ds_grid))) {
   chck[, `:=`(diff = abs(value - ds_val), rel_diff = abs(value - ds_val) / pmax(value, 1e-12))]
   
   if (any(chck$diff > tol_rel)) {
-    cli_alert_warning("Target mismatch in {temp_Ns}: {round(sqrt(mean(chck$diff^2)), 4)} RMSD")
+    tot_demanded   <- sum(chck$value, na.rm = TRUE)
+    tot_downscaled <- sum(chck$ds_val, na.rm = TRUE)
+    pct_achieved   <- if (tot_demanded > 0) (tot_downscaled / tot_demanded) * 100 else 100
+    
+    cli_alert_warning("Target mismatch in {temp_Ns}: {round(sqrt(mean(chck$diff^2)), 4)} RMSD | Downscaled: {round(tot_downscaled, 2)} / Demanded: {round(tot_demanded, 2)} ({round(pct_achieved, 2)}%)")
     
     # Print top deviations for debugging
     message(">>> Top Deviations:")
@@ -641,6 +729,7 @@ for (iter in seq_len(nrow(ds_grid))) {
       tt_diag[, times := as.integer(times)]
       
       perf_report <- merge(chck_dt, tt_diag, by = c(".SCEN_ID.", ".REGION_ID.", "times", "from_class", "to_class"), all.x = TRUE)
+      perf_report <- perf_report[from_class != to_class]
       setcolorder(perf_report, c(".SCEN_ID.", ".REGION_ID.", "times", "from_class", "to_class", "value", "ds_val", "diff", "rel_diff"))
       fwrite(nThread = 1, perf_report, file = files$report_output, append = file.exists(files$report_output), col.names = !file.exists(files$report_output))
     }

@@ -685,6 +685,14 @@ err_check_inputs_pop <- function(targets, xmat, betas, xmat_coltypes,
   covered <- unique(betas[, .(pop_type)])
   if (!is.null(priors)) covered <- unique(rbind(covered, priors[, .(pop_type)]))
   uncovered <- unique(targets[, .(pop_type)])[!covered, on = .(pop_type)]
+  
+  if (nrow(uncovered) > 0) {
+    wildcard <- factor(PLCHOLD_POPT, levels = getOption("downscalr.global_levels")$pop_type)
+    if (nrow(covered[pop_type == wildcard]) > 0) {
+      uncovered <- uncovered[0]
+    }
+  }
+  
   if (nrow(uncovered) > 0) stop(paste0(err.txt, "Missing betas or priors for target: ", paste(uncovered[1, .(pop_type)], collapse = " -> ")))
   
   valid_types <- c("static", "dynamic", "projected")
