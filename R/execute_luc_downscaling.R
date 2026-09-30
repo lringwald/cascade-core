@@ -136,7 +136,8 @@ execute_luc_downscaling <- function(
   country_filter = NULL,
   countries_to_run = NULL,
   downscale_resolution = "5km",
-  calc_prior_impact_metric = FALSE
+  calc_prior_impact_metric = FALSE,
+  base_year = NULL
 ) {
   # Ensure inputs are data.tables
   if (!is.data.table(targets)) setDT(targets)
@@ -207,9 +208,17 @@ execute_luc_downscaling <- function(
   mappings <- list(mapping_grid = mapping_grid)
 
   # Base-year zero-transitions are injected once, upstream, by the caller (see
-  # process_downscaling_v2.R's adapt_targets()) — not repeated here to avoid
+  # process_lu_downscaling.R's adapt_targets()) — not repeated here to avoid
   # double-injecting duplicate rows.
-  base_year_val <- if (exists("BASE_YEAR")) BASE_YEAR else 2000
+  base_year_val <- if (!is.null(base_year)) {
+    as.integer(base_year)
+  } else if (exists("current_model_cfg") && !is.null(current_model_cfg$base_year)) {
+    as.integer(current_model_cfg$base_year)
+  } else if (exists("BASE_YEAR")) {
+    as.integer(BASE_YEAR)
+  } else {
+    2000L
+  }
 
   # Ensure character typing
   targets[, times := as.character(times)]
@@ -291,8 +300,8 @@ ds_grid <- ds_grid[order(.SCEN_ID. != baseline_scen, .REGION_ID., .SCEN_ID.)]
 cli_h1("2. Starting Land Use Downscaling (LUC)")
 pb <- cli_progress_bar(total = nrow(ds_grid))
 
-# Initializing output files (clear existing)
-unlink(c(files$luc_output, files$lu_output, files$diag_output))
+# Initializing output files (clear existing chunk outputs)
+unlink(c(files$luc_output, files$lu_output))
 for (iter in seq_len(nrow(ds_grid))) {
   temp_Ns   <- ds_grid[iter, .REGION_ID.]
   temp_scen <- ds_grid[iter, .SCEN_ID.]
@@ -349,7 +358,11 @@ for (iter in seq_len(nrow(ds_grid))) {
 
 
   # 3.2 Prepare Priors for Region
-  temp_country <- if (!is.null(country_col) && country_col %in% names(temp_grid)) unique(temp_grid[[country_col]]) else NULL
+  temp_country <- if (!is.null(country_col) && country_col %in% names(temp_grid)) {
+    unique(temp_grid[[country_col]])
+  } else if (!is.null(country_col) && country_col %in% region_cols && ".REGION_ID." %in% names(temp_grid)) {
+    unique(temp_grid[[".REGION_ID."]])
+  } else NULL
   temp_grid_cols <- intersect(c("ns", country_col, "GLOB_LUID", "GLOB_AEZ", "GLOB_altitude", "GLOB_slope", "GLOB_soil"), names(temp_grid))
   temp_grid_ns <- unique(temp_grid[, ..temp_grid_cols])
   # Integrity check before joining priors
@@ -474,6 +487,21 @@ for (iter in seq_len(nrow(ds_grid))) {
               c_both[, from_class := from_alias]
               c_both[, to_class := to_alias]
               new_chunks[[paste0("both_", from_alias, "_", to_alias)]] <- c_both
+            } else if (from_parent == to_parent && from_alias != to_alias) {
+              # Cross-sibling transition between subclasses of same parent (e.g. fallow -> set_aside)
+              meta_keys <- intersect(names(betas_region), c("group", "Ns_reg", ".REGION_ID.", country_col, "ks"))
+              sib_dt <- unique(betas_region[, ..meta_keys])
+              if (nrow(sib_dt) == 0 && "ks" %in% names(betas_region)) sib_dt <- data.table(ks = unique(betas_region$ks))
+              sib_dt[, from_class := from_alias]
+              sib_dt[, to_class := to_alias]
+              sib_dt[, value := 0]
+              if ("value_q025" %in% names(betas_region)) sib_dt[, value_q025 := 0]
+              if ("value_q975" %in% names(betas_region)) sib_dt[, value_q975 := 0]
+              if ("pooled" %in% names(betas_region)) sib_dt[, pooled := FALSE]
+              if ("group" %in% names(betas_region) && !"group" %in% names(sib_dt)) sib_dt[, group := unique(na.omit(betas_region$group))[1]]
+              if ("Ns_reg" %in% names(betas_region) && !"Ns_reg" %in% names(sib_dt)) sib_dt[, Ns_reg := as.character(temp_Ns)]
+              if (".REGION_ID." %in% names(betas_region) && !".REGION_ID." %in% names(sib_dt)) sib_dt[, .REGION_ID. := as.character(temp_Ns)]
+              new_chunks[[paste0("sibling_", from_alias, "_", to_alias)]] <- sib_dt
             }
           }
         }
@@ -512,7 +540,38 @@ for (iter in seq_len(nrow(ds_grid))) {
       if ("value_q025" %in% names(betas_region)) neutral_betas[, value_q025 := 0]
       if ("value_q975" %in% names(betas_region)) neutral_betas[, value_q975 := 0]
       if ("pooled" %in% names(betas_region)) neutral_betas[, pooled := FALSE]
-      if (!is.null(country_col) && country_col %in% names(betas_region)) neutral_betas[, (country_col) := temp_country[1]]
+      
+      # Correctly populate identifying columns (group, Ns_reg, country_col, .REGION_ID.) to prevent NAs
+      if ("group" %in% names(betas_region)) {
+        grp_val <- unique(na.omit(betas_region$group))[1]
+        if (is.na(grp_val) || is.null(grp_val)) {
+          grp_val <- if (!is.null(temp_country) && length(temp_country) > 0 && !is.na(temp_country[1])) temp_country[1] else substr(as.character(temp_Ns), 1, 2)
+        }
+        neutral_betas[, group := grp_val]
+      }
+      if ("Ns_reg" %in% names(betas_region)) {
+        reg_val <- unique(na.omit(betas_region$Ns_reg))[1]
+        if (is.na(reg_val) || is.null(reg_val)) reg_val <- as.character(temp_Ns)
+        neutral_betas[, Ns_reg := reg_val]
+      }
+      if (".REGION_ID." %in% names(betas_region)) {
+        neutral_betas[, .REGION_ID. := as.character(temp_Ns)]
+      }
+      if (!is.null(country_col) && country_col %in% names(betas_region) && !country_col %in% names(neutral_betas)) {
+        c_val <- if (!is.null(temp_country) && length(temp_country) > 0 && !is.na(temp_country[1])) {
+          temp_country[1]
+        } else {
+          unique(na.omit(betas_region[[country_col]]))[1]
+        }
+        if (is.na(c_val) || is.null(c_val)) c_val <- substr(as.character(temp_Ns), 1, 2)
+        neutral_betas[, (country_col) := c_val]
+      }
+      for (col in setdiff(names(betas_region), names(neutral_betas))) {
+        col_val <- unique(na.omit(betas_region[[col]]))[1]
+        if (!is.na(col_val) && !is.null(col_val)) {
+          neutral_betas[, (col) := col_val]
+        }
+      }
       betas_region <- rbind(betas_region, neutral_betas, fill = TRUE)
       message(">>> Injected neutral (zero) betas for ", nrow(missing_target_pairs), " target transitions lacking econometric models in region ", temp_Ns)
     }
@@ -520,15 +579,40 @@ for (iter in seq_len(nrow(ds_grid))) {
     # 2. Add missing KS for this region safely
     missing_region_ks <- setdiff(unique(xmat_region$ks), unique(betas_region$ks))
     if (length(missing_region_ks) > 0 && nrow(betas_region) > 0) {
-       key_cols <- intersect(names(betas_region), c("from_class", "to_class", country_col))
-       valid_keys_reg <- unique(betas_region[, ..key_cols])
+       meta_cols <- setdiff(names(betas_region), c("ks", "value", "value_q025", "value_q975", "pooled"))
+       valid_keys_reg <- unique(betas_region[, ..meta_cols])
        new_betas_reg <- valid_keys_reg[, .(ks = missing_region_ks), by = names(valid_keys_reg)]
        new_betas_reg[, value := 0]
        if ("value_q025" %in% names(betas_region)) new_betas_reg[, value_q025 := 0]
        if ("value_q975" %in% names(betas_region)) new_betas_reg[, value_q975 := 0]
        if ("pooled" %in% names(betas_region)) new_betas_reg[, pooled := FALSE]
-       betas_region <- rbind(betas_region, new_betas_reg, fill=TRUE)
+       betas_region <- rbind(betas_region, new_betas_reg, fill = TRUE)
        message(">>> Injected ", length(missing_region_ks), " missing covariates locally for region ", temp_Ns)
+    }
+    
+    # Ensure no lingering NA values in betas_region (e.g. metadata columns) that would fail integrity check
+    if (nrow(betas_region) > 0 && anyNA(betas_region)) {
+      if ("group" %in% names(betas_region) && anyNA(betas_region$group)) {
+        grp_val <- unique(na.omit(betas_region$group))[1]
+        if (is.na(grp_val) || is.null(grp_val)) grp_val <- substr(as.character(temp_Ns), 1, 2)
+        betas_region[is.na(group), group := grp_val]
+      }
+      if ("Ns_reg" %in% names(betas_region) && anyNA(betas_region$Ns_reg)) {
+        betas_region[is.na(Ns_reg), Ns_reg := as.character(temp_Ns)]
+      }
+      if (".REGION_ID." %in% names(betas_region) && anyNA(betas_region$.REGION_ID.)) {
+        betas_region[is.na(.REGION_ID.), .REGION_ID. := as.character(temp_Ns)]
+      }
+      for (col in names(betas_region)) {
+        if (anyNA(betas_region[[col]])) {
+          val <- unique(na.omit(betas_region[[col]]))[1]
+          if (!is.na(val) && !is.null(val)) {
+            betas_region[is.na(get(col)), (col) := val]
+          } else if (!col %in% c("ks", "from_class", "to_class", "value")) {
+            betas_region[, (col) := NULL]
+          }
+        }
+      }
     }
     
     # 3. Dynamic Prior Weighting
@@ -657,6 +741,33 @@ for (iter in seq_len(nrow(ds_grid))) {
   tt_agg <- temp_res$out_res[, .(value = sum(value)), by = .(to_class, times, ns)]
   tt_agg[, `:=`(.SCEN_ID. = temp_scen, .REGION_ID. = temp_Ns, downscaling_area_flag = 0L)]
   setnames(tt_agg, "to_class", "lu")
+
+  # Inject Base Year Start Map (Zero Transitions State) so Base Year raster and tables are generated
+  if (!as.integer(base_year_val) %in% unique(as.integer(as.character(tt_agg$times)))) {
+    time_type <- typeof(tt_agg$times)
+    times_base <- if (is.factor(tt_agg$times)) factor(as.character(base_year_val), levels = c(as.character(base_year_val), levels(tt_agg$times))) else if (time_type == "integer") as.integer(base_year_val) else if (time_type == "character") as.character(base_year_val) else base_year_val
+    tt_start <- copy(temp_start_map)
+    tt_start[, `:=`(
+      lu = from_class,
+      times = times_base,
+      .SCEN_ID. = temp_scen,
+      .REGION_ID. = temp_Ns,
+      downscaling_area_flag = 0L
+    )]
+    tt_agg <- rbindlist(list(tt_start[, .(lu, times, ns, value, .SCEN_ID., .REGION_ID., downscaling_area_flag)], tt_agg), use.names = TRUE)
+  }
+
+  if (!as.integer(base_year_val) %in% unique(as.integer(as.character(tt_res$times))) && nrow(tt_res) > 0) {
+    time_type_res <- typeof(tt_res$times)
+    times_base_res <- if (is.factor(tt_res$times)) factor(as.character(base_year_val), levels = c(as.character(base_year_val), levels(tt_res$times))) else if (time_type_res == "integer") as.integer(base_year_val) else if (time_type_res == "character") as.character(base_year_val) else base_year_val
+    tt_res_start <- copy(tt_res[1])
+    tt_res_start[, `:=`(
+      times = times_base_res,
+      value = 0,
+      downscaling_area_flag = 0L
+    )]
+    tt_res <- rbindlist(list(tt_res_start, tt_res), use.names = TRUE)
+  }
 
 
   # 4.3 Diagnostics & Consistency Checks
