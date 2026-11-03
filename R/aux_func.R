@@ -6,6 +6,10 @@ PLCHOLD_LU = "__NA_LU__"
 PLCHOLD_POPT = "__NA_POPT__"
 PLCHOLD_K = "__NA_K__"
 PLCHOLD_T = "__NA_TIME__"
+# Scenario wildcard for restrictions and priors: a row whose scenario is
+# PLCHOLD_SCEN applies to every scenario. Any other scenario value must match
+# a scenario in the targets exactly (see execute_luc_downscaling()).
+PLCHOLD_SCEN = "__NA_SCEN__"
 
 # ------------------------------------------------------------------------------
 # INTERNAL HELPERS
