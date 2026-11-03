@@ -2,7 +2,7 @@
 # and unmet-demand diagnostics. One region, two pixels, sources `low` and `mid`
 # (10 km2 each per pixel), destination `high`.
 
-run_case <- function(restrictions, target_low = 4, target_mid = 4) {
+run_case <- function(restrictions, target_low = 4, target_mid = 4, keep_pixels = FALSE) {
   out <- withr::local_tempdir(.local_envir = parent.frame())
   files <- list(lu_output   = file.path(out, "lu.csv"),
                 luc_output  = file.path(out, "luc.csv"),
@@ -23,7 +23,7 @@ run_case <- function(restrictions, target_low = 4, target_mid = 4) {
   luc  <- data.table::fread(files$luc_output)
   diag <- data.table::fread(files$diag_output)
   flow <- function(f) luc[from_class == f & to_class == "high" & times == 2030, sum(value)]
-  list(low = flow("low"), mid = flow("mid"), diag = diag)
+  list(low = flow("low"), mid = flow("mid"), diag = diag, luc = luc)
 }
 
 pair_rule <- function(...) {
@@ -62,9 +62,31 @@ test_that("unmatched scenario or period tags fail instead of dropping rows", {
   expect_error(run_case(pair_rule(scenario = "S1", times = "ALL")), "match no target period")
 })
 
-test_that("non-binary restriction values are rejected before solving", {
-  frac <- pair_rule(scenario = "S1"); frac[, value := 0.5]
-  expect_error(run_case(frac), "must be 0 or 1")
+test_that("restriction values outside [0, 1] are rejected before solving", {
+  bad <- pair_rule(scenario = "S1"); bad[, value := 1.5]
+  expect_error(run_case(bad), "restricted share in \\[0, 1\\]")
+})
+
+test_that("a fractional restriction caps each pixel at (1 - r) of the source area", {
+  # r = 0.5 in both pixels: at most 5 km2 of `low` per pixel may become `high`.
+  half <- pair_rule(scenario = "S1"); half[, value := 0.5]
+  r <- run_case(half, target_low = 15, target_mid = 4, keep_pixels = TRUE)
+  per_pixel <- r$luc[from_class == "low" & to_class == "high" & times == 2030, .(v = sum(value)), by = ns]
+  expect_true(all(per_pixel$v <= 5 + 1e-6))
+  expect_equal(sum(per_pixel$v), 10, tolerance = 1e-4)
+  d_low <- r$diag[from_class == "low" & to_class == "high"]
+  expect_equal(d_low$target_capped, 10, tolerance = 1e-6)
+  expect_equal(d_low$unmet, 5, tolerance = 1e-4)
+  expect_equal(r$mid, 4, tolerance = 1e-6)
+})
+
+test_that("fractional caps hold when the target is reachable without capping", {
+  # Target 8 < allowed 10: the solver must still respect 5 per pixel.
+  half <- pair_rule(scenario = "S1"); half[, value := 0.5]
+  r <- run_case(half, target_low = 8, target_mid = 4, keep_pixels = TRUE)
+  per_pixel <- r$luc[from_class == "low" & to_class == "high" & times == 2030, .(v = sum(value)), by = ns]
+  expect_true(all(per_pixel$v <= 5 + 1e-6))
+  expect_equal(sum(per_pixel$v), 8, tolerance = 1e-4)
 })
 
 test_that("diagnostics report requested, capped, achieved and unmet area", {

@@ -592,7 +592,9 @@ err_check_inputs <- function(targets, areas, xmat, betas,
   if (any(targets$value < 0)) stop(paste0(err.txt, "Negative targets"))
   if (any(areas$value < 0)) stop(paste0(err.txt, "Areas must be >= 0"))
   if (!is.null(priors) && any(priors$value < 0)) stop(paste0(err.txt, "Priors must be >= 0"))
-  if (!is.null(restrictions) && !all(restrictions$value %in% c(0, 1))) stop(paste0(err.txt, "Restrictions must be 0 or 1"))
+  # Restrictions are the restricted share r of the source area in a pixel: allocation
+  # of source k to target l in pixel i is capped at (1 - r) * area_ik across all stages.
+  if (!is.null(restrictions) && (anyNA(restrictions$value) || any(restrictions$value < 0 | restrictions$value > 1))) stop(paste0(err.txt, "Restrictions must be shares in [0, 1]"))
   max_target_sum <- if (nrow(targets) > 0) max(targets[, .(tot = sum(value, na.rm=TRUE)), by = times]$tot) else 0
   if (max_target_sum > sum(areas$value, na.rm=TRUE) + 1e-4) stop(paste0(err.txt, "Targets exceed total area"))
   

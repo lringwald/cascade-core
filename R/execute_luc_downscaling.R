@@ -115,10 +115,9 @@ require(progress)
 #   - scenario: a real target scenario, or PLCHOLD_SCEN for "every scenario"
 #   - times:    a real target period; omit the column for "every period"
 #               (complete_restrictions() then replicates rows over all periods)
-#   - value:    0 or 1. The solver stages assume binary restrictions: with a
-#               fractional r the single-target and mop-up stages compute the
-#               allowed area as remaining_area * (1 - r) after earlier stages
-#               already filled up to the cap, so the cap can be exceeded.
+#   - value:    the restricted share r in [0, 1]; allocation from the source
+#               class into the target class is capped at (1 - r) of the source
+#               area in the pixel (1 = fully prohibited, 0 = unrestricted).
 .validate_restriction_keys <- function(restrictions, targets) {
   if (is.null(restrictions) || !nrow(restrictions)) return(invisible(TRUE))
   fmt <- function(x) paste(utils::head(sort(unique(x)), 5), collapse = ", ")
@@ -143,12 +142,9 @@ require(progress)
 
   if ("value" %in% names(restrictions)) {
     v <- restrictions$value
-    if (anyNA(v) || !all(v %in% c(0, 1))) {
-      frac <- sum(!is.na(v) & v > 0 & v < 1)
-      stop(sprintf(paste0(
-        "execute_luc_downscaling: restriction `value` must be 0 or 1 (%d fractional or invalid values found). ",
-        "Fractional restricted shares are not supported by the solver stages; binarize them upstream."),
-        frac + sum(is.na(v) | v < 0 | v > 1)), call. = FALSE)
+    if (anyNA(v) || any(v < 0 | v > 1)) {
+      stop(sprintf("execute_luc_downscaling: restriction `value` must be a restricted share in [0, 1] (%d invalid values).",
+                   sum(is.na(v) | v < 0 | v > 1)), call. = FALSE)
     }
   }
   invisible(TRUE)

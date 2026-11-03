@@ -6,7 +6,8 @@
 #' @param x Bias correction parameters
 #' @param mu_alloc Means of each class
 #' @param areas Vector of areas
-#' @param restrictions Optional restrictions. Binary, if 1, the log-odds are set to zero
+#' @param restrictions Optional restricted shares r in [0, 1] (1 = prohibited). Allocation is
+#'   multiplied by (1 - r); since MNL shares are <= 1 this caps it at (1 - r) * areas.
 #' @param cutoff Optional, defaults to zero. If set, all log-odds below cutoff are set to zero
 #' @param area_cutoff Boolean, defaults to FALSE. If TRUE, cutoff triggers based on area instead
 #'
