@@ -105,6 +105,85 @@ require(progress)
 # Once-per-session reporting flags, so the region loop does not emit one line per region.
 .cascade_beta_state <- new.env(parent = emptyenv())
 
+# ---------------------------------------------------------------------------
+# Static regions: start-map regions without targets
+# ---------------------------------------------------------------------------
+# Appends their start-map land cover to the LU output (every run period plus the base
+# year) and stay rows to the LUC output (every run period after the base year), with the
+# same columns as the solved regions and downscaling_area_flag = 2L.
+.write_static_regions <- function(start_map_split, targeted_pairs, run_times, mapping_grid,
+                                  country_col, country_filter, region_cols, scen_cols,
+                                  region_map, scen_map, base_year_val, time_col, from_col,
+                                  to_col, pixel_id_col, value_col, files) {
+  scens <- unique(run_times$.SCEN_ID.)
+  if (!length(scens) || !length(start_map_split)) return(invisible(NULL))
+  pairs <- CJ(.SCEN_ID. = scens, .REGION_ID. = names(start_map_split))
+  pairs <- pairs[!targeted_pairs, on = .(.SCEN_ID., .REGION_ID.)]
+
+  # Respect a country filter where the region's country can be resolved.
+  if (!is.null(country_filter) && nrow(pairs)) {
+    if (!is.null(country_col) && country_col %in% names(mapping_grid)) {
+      keep <- unique(mapping_grid[get(country_col) %in% country_filter, .REGION_ID.])
+      pairs <- pairs[.REGION_ID. %in% keep]
+    } else if (identical(country_col, region_cols)) {
+      pairs <- pairs[.REGION_ID. %in% country_filter]
+    } else {
+      cli_alert_warning("Static regions skipped: country_filter is set but regions cannot be mapped to countries.")
+      return(invisible(NULL))
+    }
+  }
+  if (!nrow(pairs)) return(invisible(NULL))
+
+  base_chr <- as.character(base_year_val)
+  lu_parts <- list(); luc_parts <- list()
+  for (k in seq_len(nrow(pairs))) {
+    sc <- pairs$.SCEN_ID.[k]; rg <- pairs$.REGION_ID.[k]
+    sm <- start_map_split[[rg]][value > 0, .(value = sum(value)), by = .(ns, from_class)]
+    if (!nrow(sm)) next
+    tms <- unique(c(base_chr, as.character(run_times[.SCEN_ID. == sc, times])))
+    lu <- sm[, .(lu = from_class, ns, value)][, .(times = tms), by = .(lu, ns, value)]
+    lu[, `:=`(.SCEN_ID. = sc, .REGION_ID. = rg, downscaling_area_flag = 2L)]
+    lu_parts[[length(lu_parts) + 1L]] <- lu
+    tms_luc <- setdiff(tms, base_chr)
+    if (length(tms_luc)) {
+      luc <- sm[, .(from_class, to_class = from_class, ns, value)][, .(times = tms_luc), by = .(from_class, to_class, ns, value)]
+      luc[, `:=`(rebalancing_applied = FALSE, .SCEN_ID. = sc, .REGION_ID. = rg, downscaling_area_flag = 2L)]
+      luc_parts[[length(luc_parts) + 1L]] <- luc
+    }
+  }
+  if (!length(lu_parts)) return(invisible(NULL))
+
+  finalize <- function(dt, lead_cols) {
+    if (length(scen_cols) > 1) dt <- merge(dt, scen_map, by = ".SCEN_ID.", all.x = TRUE) else setnames(dt, ".SCEN_ID.", scen_cols)
+    if (length(region_cols) > 1) dt <- merge(dt, region_map, by = ".REGION_ID.", all.x = TRUE) else setnames(dt, ".REGION_ID.", region_cols)
+    drop <- intersect(names(dt), c(".SCEN_ID.", ".REGION_ID."))
+    if (length(drop)) set(dt, j = drop, value = NULL)
+    setcolorder(dt, intersect(c(scen_cols, region_cols, lead_cols), names(dt)))
+    dt
+  }
+  append_aligned <- function(dt, file) {
+    if (file.exists(file)) {
+      hdr <- names(fread(file, nrows = 0))
+      for (cc in setdiff(hdr, names(dt))) set(dt, j = cc, value = NA)
+      dt <- dt[, intersect(hdr, names(dt)), with = FALSE]
+    }
+    fwrite(nThread = 1, dt, file = file, append = file.exists(file), col.names = !file.exists(file))
+  }
+
+  lu_all <- finalize(rbindlist(lu_parts, use.names = TRUE), c("times", "lu", "ns", "value"))
+  setnames(lu_all, c("times", "ns", "value"), c(time_col, pixel_id_col, value_col), skip_absent = TRUE)
+  append_aligned(lu_all, files$lu_output)
+  if (length(luc_parts)) {
+    luc_all <- finalize(rbindlist(luc_parts, use.names = TRUE), c("times", "from_class", "to_class", "ns", "value"))
+    setnames(luc_all, c("times", "from_class", "to_class", "ns", "value"),
+             c(time_col, from_col, to_col, pixel_id_col, value_col), skip_absent = TRUE)
+    append_aligned(luc_all, files$luc_output)
+  }
+  n_reg <- uniqueN(pairs$.REGION_ID.)
+  cli_alert_info("Static regions: {n_reg} start-map region(s) without targets written unchanged ({nrow(pairs)} region x scenario pair(s), downscaling_area_flag = 2).")
+  invisible(pairs)
+}
+
 
 execute_luc_downscaling <- function(
   targets,
@@ -137,7 +216,8 @@ execute_luc_downscaling <- function(
   countries_to_run = NULL,
   downscale_resolution = "5km",
   calc_prior_impact_metric = FALSE,
-  base_year = NULL
+  base_year = NULL,
+  write_static_regions = TRUE
 ) {
   # Ensure inputs are data.tables
   if (!is.data.table(targets)) setDT(targets)
@@ -246,6 +326,10 @@ execute_luc_downscaling <- function(
 # 2. Applying Scoping & Pre-splitting
 # ---------------------------------------------------------------
 if (!is.null(scen_filter))    targets <- targets[.SCEN_ID. %in% scen_filter]
+# Region x scenario pairs that have targets at all (before the year and country filters,
+# which select what is run, not what the macro model covers). Start-map regions outside
+# these pairs are written as static regions after the loop.
+targeted_pairs <- unique(targets[, .(.SCEN_ID., .REGION_ID.)])
 if (!is.null(year_filter))    targets <- targets[times %in% as.character(c(base_year_val, year_filter))]
 if (!is.null(country_filter) && !is.null(country_col) && country_col %in% names(targets)) targets <- targets[get(country_col) %in% country_filter]
 
@@ -926,6 +1010,24 @@ for (iter in seq_len(nrow(ds_grid))) {
 }
 
 cli_progress_done(id = pb)
+
+# ---------------------------------------------------------------
+# 5. Static Regions (start-map regions without targets)
+# ---------------------------------------------------------------
+# Regions the macro model does not represent (no targets for a scenario, e.g. city
+# states) are not solved, but they must not disappear from the outputs: they keep their
+# start-map land cover in every period, written as stay rows with
+# downscaling_area_flag = 2L.
+if (isTRUE(write_static_regions)) {
+  run_times <- unique(rbindlist(lapply(targets_split, function(x) unique(x[, .(.SCEN_ID., times)]))))
+  .write_static_regions(
+    start_map_split = start_map_split, targeted_pairs = targeted_pairs, run_times = run_times,
+    mapping_grid = mapping_grid, country_col = country_col, country_filter = country_filter,
+    region_cols = region_cols, scen_cols = scen_cols, region_map = region_map, scen_map = scen_map,
+    base_year_val = base_year_val, time_col = time_col, from_col = from_col, to_col = to_col,
+    pixel_id_col = pixel_id_col, value_col = value_col, files = files)
+}
+
 cli_alert_success("Downscaling completed successfully. Results saved to: {files$lu_output}")
 
 

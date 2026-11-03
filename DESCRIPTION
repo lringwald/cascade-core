@@ -15,3 +15,6 @@ Imports:
     terra,
     Rcpp
 LinkingTo: Rcpp
+Suggests:
+    testthat,
+    withr
