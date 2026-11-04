@@ -176,9 +176,37 @@ calculate_target_deviation <- function(pred_totals, target_totals, options) {
   calculate_objective_error(pred_totals, target_totals, options$obj_fun, options$optimize_log_scale)
 }
 
+#' Effective restrictions for a stage that starts from a partial allocation
+#'
+#' A restriction r in [0, 1] caps the allocation of the current source class to a
+#' target in a pixel at (1 - r) * original_area. Stages after the first see only the
+#' residual land (`active_areas`) and apply `active_areas * (1 - r)`, which ignores
+#' what the earlier stages already put into that target and can exceed the cap.
+#' This returns r_eff such that active_areas * (1 - r_eff) equals the remaining
+#' capacity min((1 - r) * original_area - allocated, active_areas), clamped to >= 0.
+#' For binary r the result equals r, so binary restrictions behave exactly as before.
+#'
 #' @keywords internal
 #' @noRd
-update_residual_state <- function(targets, current_mu = NULL, areas = NULL, 
+residual_restrictions <- function(restrictions, original_areas, allocated, active_areas, pixel_avail) {
+  if (is.null(restrictions)) return(NULL)
+  r <- restrictions[pixel_avail, , drop = FALSE]
+  n <- nrow(r); k <- ncol(r)
+  area0 <- matrix(as.vector(original_areas[pixel_avail]), nrow = n, ncol = k)
+  act   <- matrix(as.vector(active_areas), nrow = n, ncol = k)
+  done  <- allocated[pixel_avail, colnames(r), drop = FALSE]
+  remaining_cap <- pmax((1 - r) * area0 - done, 0)
+  allowed <- pmin(remaining_cap, act)
+  r_eff <- matrix(1, nrow = n, ncol = k, dimnames = dimnames(r))
+  has_land <- act > 0
+  r_eff[has_land] <- 1 - allowed[has_land] / act[has_land]
+  r_eff[] <- pmin(pmax(r_eff, 0), 1)
+  r_eff
+}
+
+#' @keywords internal
+#' @noRd
+update_residual_state <- function(targets, current_mu = NULL, areas = NULL,
                                   restrictions = NULL, pixel_avail, type = "lu") {
   
   # Initialize a zero-matrix for tracking allocations at the pixel level
@@ -746,10 +774,12 @@ optim_allocation <- function(targets, priors, restrictions = NULL, pixel_avail,
   
   # ---- 7. PHASE 3: SEQUENTIAL SHAVING ----
   if (isTRUE(options$use_single_nloptr) && !converged && any(active_targets > options$max_diff)) {
+    # Restrictions as remaining capacity per target, given what Phases 0-2 allocated.
+    restr_boost <- if (type == "lu") residual_restrictions(restrictions, original_areas, master_out_mu, active_areas, pixel_avail) else restrictions
     res_boost <- run_single_nloptr_phase(
       master_out_mu = master_out_mu, curr_sol = curr_sol, x0 = x0, 
       active_targets = active_targets, active_areas = active_areas, # Pass clean residuals!
-      priors = priors, restrictions = restrictions, pixel_avail = pixel_avail, type = type,
+      priors = priors, restrictions = restr_boost, pixel_avail = pixel_avail, type = type,
       alloc_func = alloc_func, alloc_args = alloc_args, nloptr_extra_args = nloptr_extra_args, 
       log_priors = log_priors, options = options, res_main_final = solver_runs[["nloptr"]]$adaptive_summary
     )
@@ -768,10 +798,12 @@ optim_allocation <- function(targets, priors, restrictions = NULL, pixel_avail,
     )
     
     if (any(final_state$targets > 1e-9)) {
+      # Restrictions as remaining capacity per target, given everything allocated so far.
+      restr_mopup <- if (type == "lu") residual_restrictions(restrictions, original_areas, final_state$already_allocated, final_state$areas, pixel_avail) else restrictions
       res_mopup <- run_mopup_phase(
         master_out_mu = final_state$already_allocated, curr_sol = curr_sol,
         active_targets = final_state$targets, active_areas = final_state$areas, 
-        restrictions = restrictions, pixel_avail = pixel_avail, type = type, options = options
+        restrictions = restr_mopup, pixel_avail = pixel_avail, type = type, options = options
       )
       master_out_mu <- res_mopup$out_mu
       solver_runs[["mopup"]] <- res_mopup$runs
