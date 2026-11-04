@@ -98,9 +98,9 @@ solve_gross_transitions <- function(from_targets, to_targets, prior=NULL, keep_a
   if (!is.data.table(from_targets)) from_targets <- as.data.table(from_targets)
   if (!is.data.table(to_targets)) to_targets <- as.data.table(to_targets)
   
-  # Ensure we don't modify the originals by reference unnecessarily if they are passed by user
-  from_targets <- copy(from_targets[, .(lu, value)])
-  to_targets <- copy(to_targets[, .(lu, value)])
+  # Ensure unique classes and non-duplicate margins
+  from_targets <- from_targets[, .(value = sum(value, na.rm = TRUE)), by = lu]
+  to_targets <- to_targets[, .(value = sum(value, na.rm = TRUE)), by = lu]
   
   lu_classes <- unique(c(as.character(from_targets$lu), as.character(to_targets$lu)))
   
@@ -157,25 +157,38 @@ solve_gross_transitions <- function(from_targets, to_targets, prior=NULL, keep_a
     rn <- rownames(matA)
     cn <- colnames(matA)
     
-    for (jjj in seq_len(nrow(prior))) {
-      p_from <- prior$from_class[jjj]
-      p_to <- prior$to_class[jjj]
-      p_val <- prior$value[jjj]
-      
-      n_from <- nchar(p_from)
-      row.pointer <- which(rn == p_from)
-      if (length(row.pointer) == 0) {
-        row.pointer <- which(startsWith(rn, p_from) & (nchar(rn) == n_from | substr(rn, n_from + 1, n_from + 1) == "."))
-      }
-      
-      n_to <- nchar(p_to)
-      col.pointer <- which(cn == p_to)
-      if (length(col.pointer) == 0) {
-        col.pointer <- which(startsWith(cn, p_to) & (nchar(cn) == n_to | substr(cn, n_to + 1, n_to + 1) == "."))
-      }
-      
-      if (length(row.pointer) > 0 && length(col.pointer) > 0) {
-        matA[row.pointer, col.pointer] <- p_val
+    # 1. Fast path: Direct exact matches
+    m_from <- match(prior$from_class, rn)
+    m_to   <- match(prior$to_class, cn)
+    exact_hits <- which(!is.na(m_from) & !is.na(m_to))
+    
+    for (k in exact_hits) {
+      matA[m_from[k], m_to[k]] <- prior$value[k]
+    }
+    
+    # 2. Hierarchical prefix matching only if classes contain dots (e.g. Forests.managed)
+    if (any(grepl("\\.", rn)) || any(grepl("\\.", cn))) {
+      rem_idx <- which(is.na(m_from) | is.na(m_to))
+      for (jjj in rem_idx) {
+        p_from <- as.character(prior$from_class[jjj])
+        p_to   <- as.character(prior$to_class[jjj])
+        p_val  <- prior$value[jjj]
+        
+        row.pointer <- m_from[jjj]
+        if (is.na(row.pointer)) {
+          n_from <- nchar(p_from)
+          row.pointer <- which(startsWith(rn, p_from) & (nchar(rn) == n_from | substr(rn, n_from + 1, n_from + 1) == "."))
+        }
+        
+        col.pointer <- m_to[jjj]
+        if (is.na(col.pointer)) {
+          n_to <- nchar(p_to)
+          col.pointer <- which(startsWith(cn, p_to) & (nchar(cn) == n_to | substr(cn, n_to + 1, n_to + 1) == "."))
+        }
+        
+        if (length(row.pointer) > 0 && length(col.pointer) > 0) {
+          matA[row.pointer, col.pointer] <- p_val
+        }
       }
     }
     
