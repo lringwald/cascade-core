@@ -105,6 +105,51 @@ require(progress)
 # Once-per-session reporting flags, so the region loop does not emit one line per region.
 .cascade_beta_state <- new.env(parent = emptyenv())
 
+# ---------------------------------------------------------------------------
+# Restriction keys must match something, or the restriction silently vanishes
+# ---------------------------------------------------------------------------
+# The region loop keeps `restrictions[.SCEN_ID. %in% c(scenario, PLCHOLD_SCEN)]`
+# and downscale() keeps `restrictions[times == period]`. A scenario or period tag
+# that matches nothing (e.g. "ALL") therefore drops every row without any message,
+# and the run proceeds as if no restrictions existed. Fail instead.
+#   - scenario: a real target scenario, or PLCHOLD_SCEN for "every scenario"
+#   - times:    a real target period; omit the column for "every period"
+#               (complete_restrictions() then replicates rows over all periods)
+#   - value:    the restricted share r in [0, 1]; allocation from the source
+#               class into the target class is capped at (1 - r) of the source
+#               area in the pixel (1 = fully prohibited, 0 = unrestricted).
+.validate_restriction_keys <- function(restrictions, targets) {
+  if (is.null(restrictions) || !nrow(restrictions)) return(invisible(TRUE))
+  fmt <- function(x) paste(utils::head(sort(unique(x)), 5), collapse = ", ")
+
+  bad_scen <- setdiff(unique(restrictions$.SCEN_ID.), c(unique(targets$.SCEN_ID.), PLCHOLD_SCEN))
+  if (length(bad_scen)) {
+    stop(sprintf(paste0(
+      "execute_luc_downscaling: restriction scenario(s) [%s] match no target scenario [%s]. ",
+      "Use a real scenario, or \"%s\" for rows that apply to every scenario."),
+      fmt(bad_scen), fmt(targets$.SCEN_ID.), PLCHOLD_SCEN), call. = FALSE)
+  }
+
+  if ("times" %in% names(restrictions)) {
+    bad_t <- setdiff(unique(as.character(restrictions$times)), unique(as.character(targets$times)))
+    if (length(bad_t)) {
+      stop(sprintf(paste0(
+        "execute_luc_downscaling: restriction period(s) [%s] match no target period [%s]. ",
+        "Use real periods, or drop the `times` column for rows that apply to every period."),
+        fmt(bad_t), fmt(targets$times)), call. = FALSE)
+    }
+  }
+
+  if ("value" %in% names(restrictions)) {
+    v <- restrictions$value
+    if (anyNA(v) || any(v < 0 | v > 1)) {
+      stop(sprintf("execute_luc_downscaling: restriction `value` must be a restricted share in [0, 1] (%d invalid values).",
+                   sum(is.na(v) | v < 0 | v > 1)), call. = FALSE)
+    }
+  }
+  invisible(TRUE)
+}
+
 
 execute_luc_downscaling <- function(
   targets,
@@ -193,6 +238,7 @@ execute_luc_downscaling <- function(
 
   if (!is.null(restrictions)) {
     if (time_col %in% names(restrictions)) setnames(restrictions, time_col, "times")
+    if (from_col %in% names(restrictions)) setnames(restrictions, from_col, "from_class")
     if (to_col %in% names(restrictions)) setnames(restrictions, to_col, "to_class")
   }
 
@@ -235,10 +281,15 @@ execute_luc_downscaling <- function(
 
   if (!is.null(restrictions)) {
     if (!".SCEN_ID." %in% names(restrictions)) stop(sprintf("execute_luc_downscaling: scen_cols '%s' not found in `restrictions` — cannot resolve .SCEN_ID.", paste(scen_cols, collapse=", ")))
-    keep_cols_restr <- intersect(names(restrictions), c("ns", "to_class", "times", ".SCEN_ID.", country_col, "GLOB_LUID", "GLOB_AEZ", "GLOB_altitude", "GLOB_slope", "GLOB_soil", "value"))
+    # `from_class` must be kept: pair rules (from_class -> to_class) are a different
+    # constraint than destination-only rules. Dropping it turns e.g. "no intensification
+    # from A into C" into "nothing may become C", which also blocks allowed sources.
+    # Rows without from_class (or with PLCHOLD_LU) apply to every source.
+    keep_cols_restr <- intersect(names(restrictions), c("ns", "from_class", "to_class", "times", ".SCEN_ID.", country_col, "GLOB_LUID", "GLOB_AEZ", "GLOB_altitude", "GLOB_slope", "GLOB_soil", "value"))
     restrictions <- restrictions[, ..keep_cols_restr]
+    .validate_restriction_keys(restrictions, targets)
   } else {
-    restrictions <- data.table(ns=character(), to_class=character(), times=character(), .SCEN_ID.=character(), value=numeric())
+    restrictions <- data.table(ns=character(), from_class=character(), to_class=character(), times=character(), .SCEN_ID.=character(), value=numeric())
     if (!is.null(country_col)) restrictions[, (country_col) := character()]
   }
 
@@ -312,8 +363,9 @@ for (iter in seq_len(nrow(ds_grid))) {
   temp_grid <- mappings$mapping_grid[.REGION_ID. == temp_Ns]
   temp_start_map <- start_map_split[[as.character(temp_Ns)]]
   temp_targets   <- targets_split[[paste(temp_Ns, temp_scen, sep = ".")]]
-  temp_priors    <- priors[.SCEN_ID. == temp_scen]
-  temp_restrict  <- restrictions[.SCEN_ID. == temp_scen]
+  # PLCHOLD_SCEN rows apply to every scenario (see .validate_restriction_keys()).
+  temp_priors    <- priors[.SCEN_ID. %in% c(temp_scen, PLCHOLD_SCEN)]
+  temp_restrict  <- restrictions[.SCEN_ID. %in% c(temp_scen, PLCHOLD_SCEN)]
   
   if (is.null(temp_targets) || nrow(temp_targets) == 0) {
     cli_alert_warning("No targets found for this region/scenario subset. Skipping.")
@@ -896,8 +948,9 @@ for (iter in seq_len(nrow(ds_grid))) {
   fwrite(nThread = 1, tt_res, file = files$luc_output, append = file.exists(files$luc_output), col.names = !file.exists(files$luc_output))
   fwrite(nThread = 1, tt_agg, file = files$lu_output,  append = file.exists(files$lu_output),  col.names = !file.exists(files$lu_output))
   
-  if (!is.null(temp_res$out_diag)) {
-    tt_diag <- temp_res$out_diag[, `:=`(.SCEN_ID. = temp_scen, .REGION_ID. = temp_Ns)]
+  # downscale() returns `out_diagnostic`; use the exact name rather than relying on `$` partial matching.
+  if (!is.null(temp_res$out_diagnostic)) {
+    tt_diag <- temp_res$out_diagnostic[, `:=`(.SCEN_ID. = temp_scen, .REGION_ID. = temp_Ns)]
     tt_diag_final <- copy(tt_diag)
     if (length(scen_cols) > 1) tt_diag_final <- merge(tt_diag_final, scen_map, by = ".SCEN_ID.", all.x = TRUE)
     else setnames(tt_diag_final, ".SCEN_ID.", scen_cols)

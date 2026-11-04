@@ -45,6 +45,9 @@ solve_biascorr_lu     <- function(targets,
     # Extract targets
     curr_targets_vec <- targets[J(timestep, curr_lu), !c("times", "from_class")][, setNames(value, to_class)]
     curr_lu_to <- names(curr_targets_vec)
+    # Keep the requested targets: capping and rebalancing below overwrite
+    # curr_targets_vec, and the diagnostics must report what was asked for.
+    targets_requested_vec <- curr_targets_vec
     
     # Extract betas
     if (!is.null(betas) && nrow(betas) > 0) {
@@ -392,6 +395,17 @@ solve_biascorr_lu     <- function(targets,
       final_deviation = calculate_target_deviation(colSums(res$out_mu), curr_targets_vec, options),
       duration_s = duration_s
     )
+    # Unmet demand per target. final_deviation above is measured against the
+    # *capped* targets, so a target cut by restrictions or rebalancing still reads
+    # as converged; these columns report the cut explicitly.
+    achieved_vec <- colSums(res$out_mu)[names(curr_targets_vec)]
+    achieved_vec[is.na(achieved_vec)] <- 0
+    diag_dt[, `:=`(
+      target_requested = unname(targets_requested_vec[names(curr_targets_vec)]),
+      target_capped    = unname(curr_targets_vec),
+      achieved         = unname(achieved_vec),
+      unmet            = pmax(unname(targets_requested_vec[names(curr_targets_vec)] - achieved_vec), 0)
+    )]
     
     # Competition detection: If Mopup phase was explicitly called and failed (isFALSE), 
     # and it wasn't a simple budget or individual restriction issue, it's a competition conflict.
