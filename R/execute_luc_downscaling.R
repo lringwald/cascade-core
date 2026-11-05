@@ -25,6 +25,10 @@ require(progress)
 #' @param time_col Character string specifying the timestep column.
 #' @param ncores Integer specifying the number of cores for parallel execution.
 #' @param downscaling_mode Character string defining the solver mode (`"exact"`, `"fast"`, etc.).
+#' @param allowed_transitions Optional allowed-transition table (`from_class`, `to_class`,
+#'   `allowed`; see [normalize_allowed_transitions()]). `NULL` (default): no check.
+#' @param on_disallowed `"stop"` (default) or `"drop"` (drop and log) for targets on
+#'   disallowed transitions. After solving, area on a disallowed transition always stops.
 #'
 #' @return A `data.table` containing the fully downscaled land use transition trajectories.
 #' @export
@@ -262,8 +266,16 @@ execute_luc_downscaling <- function(
   downscale_resolution = "5km",
   calc_prior_impact_metric = FALSE,
   base_year = NULL,
-  write_static_regions = TRUE
+  write_static_regions = TRUE,
+  allowed_transitions = NULL,
+  on_disallowed = c("stop", "drop")
 ) {
+  # allowed_transitions: optional table (from_class, to_class, allowed) of the
+  # allowed-transition matrix (normalize_allowed_transitions()). Targets for
+  # disallowed pairs stop the run (on_disallowed = "stop") or are dropped and logged
+  # ("drop"); after solving, no disallowed pair may hold area. NULL: no check.
+  on_disallowed <- match.arg(on_disallowed)
+  disallowed_tr <- normalize_allowed_transitions(allowed_transitions)
   # Ensure inputs are data.tables
   if (!is.data.table(targets)) setDT(targets)
   if (!is.data.table(start_map)) setDT(start_map)
@@ -348,6 +360,20 @@ execute_luc_downscaling <- function(
 
   # Ensure character typing
   targets[, times := as.character(times)]
+
+  if (!is.null(disallowed_tr) && nrow(disallowed_tr)) {
+    # columns are standardized to from_class / to_class / value above
+    is_bad <- targets[, from_class != to_class & value > 0 & .pair_disallowed(from_class, to_class, disallowed_tr)]
+    if (any(is_bad)) {
+      bad <- targets[is_bad]
+      ex <- unique(bad[, .(from_class, to_class)])[1:min(3, .N)]
+      msg <- sprintf("execute_luc_downscaling: %d target row(s) (%.6g area) for disallowed transitions, e.g. %s.",
+                     nrow(bad), sum(bad$value), paste(ex$from_class, ex$to_class, sep = " -> ", collapse = ", "))
+      if (on_disallowed == "stop") stop(msg, call. = FALSE)
+      message(msg, " Dropped (on_disallowed = \"drop\").")
+      targets <- targets[!is_bad]
+    }
+  }
   if (!is.null(priors) && "times" %in% names(priors)) priors[, times := as.character(times)]
   if (!is.null(restrictions) && "times" %in% names(restrictions)) restrictions[, times := as.character(times)]
   if (!is.null(priors)) {
@@ -871,6 +897,13 @@ for (iter in seq_len(nrow(ds_grid))) {
   # -----------------------------------------------------------
   # 4.1 Post-process transitioning areas (LUC)
   tt_res <- temp_res$out_res[value != 0]
+  if (!is.null(disallowed_tr) && nrow(disallowed_tr)) {
+    leak <- tt_res[from_class != to_class & value > tol_rel & .pair_disallowed(from_class, to_class, disallowed_tr)]
+    if (nrow(leak)) {
+      stop(sprintf("execute_luc_downscaling: region %s, scenario %s: %d pixel row(s) (%.6g area) on disallowed transitions after solving.",
+                   temp_Ns, temp_scen, nrow(leak), sum(leak$value)), call. = FALSE)
+    }
+  }
   tt_res[, `:=`(.SCEN_ID. = temp_scen, .REGION_ID. = temp_Ns, downscaling_area_flag = 0L)]
   
   # 4.2 Post-process aggregate land use (LU)
