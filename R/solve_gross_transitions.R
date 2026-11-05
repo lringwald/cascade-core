@@ -134,9 +134,9 @@ solve_gross_transitions <- function(from_targets, to_targets, prior=NULL, keep_a
   if (!is.data.table(from_targets)) from_targets <- as.data.table(from_targets)
   if (!is.data.table(to_targets)) to_targets <- as.data.table(to_targets)
   
-  # Ensure we don't modify the originals by reference unnecessarily if they are passed by user
-  from_targets <- copy(from_targets[, .(lu, value)])
-  to_targets <- copy(to_targets[, .(lu, value)])
+  # Ensure unique classes and non-duplicate margins
+  from_targets <- from_targets[, .(value = sum(value, na.rm = TRUE)), by = lu]
+  to_targets <- to_targets[, .(value = sum(value, na.rm = TRUE)), by = lu]
   
   lu_classes <- unique(c(as.character(from_targets$lu), as.character(to_targets$lu)))
   
@@ -193,25 +193,36 @@ solve_gross_transitions <- function(from_targets, to_targets, prior=NULL, keep_a
     rn <- rownames(matA)
     cn <- colnames(matA)
     
-    for (jjj in seq_len(nrow(prior))) {
-      p_from <- prior$from_class[jjj]
-      p_to <- prior$to_class[jjj]
-      p_val <- prior$value[jjj]
-      
-      n_from <- nchar(p_from)
-      row.pointer <- which(rn == p_from)
-      if (length(row.pointer) == 0) {
-        row.pointer <- which(startsWith(rn, p_from) & (nchar(rn) == n_from | substr(rn, n_from + 1, n_from + 1) == "."))
+    m_from <- match(as.character(prior$from_class), rn)
+    m_to   <- match(as.character(prior$to_class), cn)
+    if (!any(grepl(".", rn, fixed = TRUE)) && !any(grepl(".", cn, fixed = TRUE))) {
+      # Fast path without hierarchical (dotted) class names: only exact matches can
+      # apply, assigned in one vectorized step. Later rows win, as in the loop below.
+      hit <- which(!is.na(m_from) & !is.na(m_to))
+      if (length(hit)) {
+        keep <- hit[!duplicated(cbind(m_from[hit], m_to[hit]), fromLast = TRUE)]
+        matA[cbind(m_from[keep], m_to[keep])] <- prior$value[keep]
       }
-      
-      n_to <- nchar(p_to)
-      col.pointer <- which(cn == p_to)
-      if (length(col.pointer) == 0) {
-        col.pointer <- which(startsWith(cn, p_to) & (nchar(cn) == n_to | substr(cn, n_to + 1, n_to + 1) == "."))
-      }
-      
-      if (length(row.pointer) > 0 && length(col.pointer) > 0) {
-        matA[row.pointer, col.pointer] <- p_val
+    } else {
+      # Hierarchical class names (e.g. Forests.managed): a prior row may match a class
+      # exactly or as a prefix. Rows are applied in order, so a later row overrides an
+      # earlier one for the same cell (e.g. an exact row after a prefix row).
+      for (jjj in seq_len(nrow(prior))) {
+        p_from <- as.character(prior$from_class[jjj])
+        p_to   <- as.character(prior$to_class[jjj])
+        row.pointer <- m_from[jjj]
+        if (is.na(row.pointer)) {
+          n_from <- nchar(p_from)
+          row.pointer <- which(startsWith(rn, p_from) & (nchar(rn) == n_from | substr(rn, n_from + 1, n_from + 1) == "."))
+        }
+        col.pointer <- m_to[jjj]
+        if (is.na(col.pointer)) {
+          n_to <- nchar(p_to)
+          col.pointer <- which(startsWith(cn, p_to) & (nchar(cn) == n_to | substr(cn, n_to + 1, n_to + 1) == "."))
+        }
+        if (length(row.pointer) > 0 && length(col.pointer) > 0) {
+          matA[row.pointer, col.pointer] <- prior$value[jjj]
+        }
       }
     }
     
