@@ -6,14 +6,21 @@
 #' @param target_to An \eqn{n} by 1 vector with values >=0. The sum of
 #' \code{target_from} must be equal to the sum of \code{target_to}.
 #'
-#' @return The rebalanced \eqn{n} by \eqn{n} matrix \code{start_mat}.
+#' @param tol.margin Relative tolerance on the margins for \code{converged}.
+#'
+#' @return A list: \code{adjusted_matrix} (row shares), \code{optimVal}, \code{gain},
+#' \code{iter}, \code{stop.reason}, \code{margin_error} (largest relative deviation of
+#' the fitted row or column totals from the targets) and \code{converged}
+#' (\code{margin_error <= tol.margin}). A fit can stop because its objective no longer
+#' improves while the margins are still missed; \code{converged} reports that.
 #' @export
 fienberg <- function(start_mat, target_from, target_to,
                      max.iter = 1000,
                      tol.optim = 1e-8,
                      tol.gain = 1e-10,
                      min.iter = 10,
-                     min_flow = NULL) {
+                     min_flow = NULL,
+                     tol.margin = 1e-6) {
   
   if (!is.matrix(start_mat)) stop("start_mat must be a matrix.")
   if (any(start_mat < 0)) stop("start_mat must have non-negative entries.")
@@ -61,12 +68,22 @@ fienberg <- function(start_mat, target_from, target_to,
     S <- sweep(S, 1, rs, "/")
   }
   
+  # Remaining margin error of the fitted flows (rows and columns, relative)
+  flows <- S * target_from
+  rel_err <- function(got, want) {
+    tot <- max(sum(want), .Machine$double.eps)
+    ifelse(want > 0, abs(got - want) / want, abs(got - want) / tot)
+  }
+  margin_error <- max(c(rel_err(rowSums(flows), target_from), rel_err(colSums(flows), target_to), 0))
+
   return(list(
     adjusted_matrix = S,
     optimVal = curr.optimVal,
     gain = curr.gain,
     iter = iter,
-    stop.reason = stop.reason
+    stop.reason = stop.reason,
+    margin_error = margin_error,
+    converged = margin_error <= tol.margin
   ))
 }
 
@@ -80,10 +97,25 @@ fienberg <- function(start_mat, target_from, target_to,
 #' @param to_targets A `data.table` with columns `lu` and `value` (numeric >= 0) representing the target areas.
 #' @param prior Optional `data.table` with columns `from_class`, `to_class` and `value` (numeric >= 0) acting as a prior preference flow matrix.
 #' @param keep_areas Character string indicating which marginal totals to preserve: `"from"`, `"to"`, or `"both"` (default).
+#' @param allowed Optional allowed-transition table (`from_class`, `to_class`, `allowed`;
+#'   see [normalize_allowed_transitions()]). Disallowed pairs get no flow. `NULL`
+#'   (default) allows every pair, as before.
+#' @param exempt_classes Classes that keep all transitions (default `"NODATA"`, the
+#'   balancing class added for `keep_areas = "both"`).
+#' @param on_infeasible With `allowed`: `"stop"` (default) or `"warn"` when the margins
+#'   cannot be met on the allowed pairs. Without `allowed`, an infeasible support only warns.
+#' @param tol_margin Relative margin tolerance for the fit diagnostics.
 #'
-#' @return A `data.table` containing the solved transition flows with columns `from_class`, `to_class`, and `value`.
+#' @return A `data.table` containing the solved transition flows with columns `from_class`,
+#'   `to_class`, and `value`. The fit diagnostics (feasibility, iterations, stop reason,
+#'   margin error, converged) are attached as attribute `"ipf_diagnostics"` and recorded
+#'   in [ipf_diagnostics()].
 #' @export
-solve_gross_transitions <- function(from_targets, to_targets, prior=NULL, keep_areas = "both") {
+solve_gross_transitions <- function(from_targets, to_targets, prior=NULL, keep_areas = "both",
+                                    allowed = NULL, exempt_classes = "NODATA",
+                                    on_infeasible = c("stop", "warn"), tol_margin = 1e-6) {
+  on_infeasible <- match.arg(on_infeasible)
+  disallowed <- normalize_allowed_transitions(allowed, exempt_classes)
   require(data.table)
   min_cutoff = 1.0e-8
   prior_off_diag = 0.1
@@ -185,6 +217,18 @@ solve_gross_transitions <- function(from_targets, to_targets, prior=NULL, keep_a
     matA <- sweep(matA, 1, rs, "/")
   }
 
+  # Allowed-transition matrix: disallowed pairs become structural zeros (IPF keeps them)
+  n_disallowed <- 0L
+  if (!is.null(disallowed) && nrow(disallowed)) {
+    hit <- disallowed[from_class %in% rownames(matA) & to_class %in% colnames(matA)]
+    if (nrow(hit)) {
+      matA[cbind(match(hit$from_class, rownames(matA)), match(hit$to_class, colnames(matA)))] <- 0
+      n_disallowed <- nrow(hit)
+      rs <- rowSums(matA); rs[rs == 0] <- 1
+      matA <- sweep(matA, 1, rs, "/")
+    }
+  }
+
   from_vec <- from_std$value
   to_vec <- to_std$value
 
@@ -202,8 +246,30 @@ solve_gross_transitions <- function(from_targets, to_targets, prior=NULL, keep_a
     return(data.table(from_class = character(0), to_class = character(0), value = numeric(0)))
   }
 
+  # Feasibility of the margins on the cells that may carry flow
+  feas <- check_transport_feasibility(matA > 0, from_vec, to_vec)
+  if (!feas$feasible) {
+    msg <- sprintf("solve_gross_transitions: margins cannot be met on the %s transitions (shortfall %.6g of %.6g).",
+                   if (is.null(disallowed)) "prior's" else "allowed", feas$shortfall, feas$total)
+    if (!is.null(disallowed) && on_infeasible == "stop") stop(msg, call. = FALSE)
+    warning(msg, call. = FALSE)
+  }
+
   # Run fienberg rebalancing
-  res <- fienberg(start_mat = matA, target_from = from_vec, target_to = to_vec)
+  res <- fienberg(start_mat = matA, target_from = from_vec, target_to = to_vec, tol.margin = tol_margin)
+  diag_row <- data.table(n_from = length(from_vec), n_to = length(to_vec), n_disallowed = n_disallowed,
+                         feasible = feas$feasible, shortfall = feas$shortfall, iter = res$iter,
+                         stop_reason = res$stop.reason, margin_error = res$margin_error, converged = res$converged)
+  .record_ipf_fit(diag_row)
+  if (!res$converged) {
+    .ipf_registry$warned <- .ipf_registry$warned + 1L
+    if (.ipf_registry$warned <= 10L) {
+      warning(sprintf("solve_gross_transitions: fit misses its margins (relative error %.3g after %d iterations; %s)%s",
+                      res$margin_error, res$iter, res$stop.reason,
+                      if (.ipf_registry$warned == 10L) " Further warnings suppressed; see ipf_diagnostics()." else ""),
+              call. = FALSE)
+    }
+  }
 
   # Extract results
   out_mat <- sweep(res$adjusted_matrix, 1, from_vec, "*")
@@ -218,5 +284,6 @@ solve_gross_transitions <- function(from_targets, to_targets, prior=NULL, keep_a
   output[, from_class := as.character(from_class)]
   output[, to_class := as.character(to_class)]
   
+  data.table::setattr(output, "ipf_diagnostics", diag_row)
   return(output)
 }
