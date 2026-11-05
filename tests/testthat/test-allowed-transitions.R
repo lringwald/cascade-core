@@ -108,3 +108,13 @@ test_that("targets on disallowed transitions stop, or are dropped on request", {
   expect_equal(luc[from_class == "low" & to_class == "mid", sum(value)], 0)
   expect_equal(luc[from_class == "low" & to_class == "high", sum(value)], 4, tolerance = 1e-6)
 })
+
+test_that("a label identifies the fit in the registry and in warnings", {
+  ipf_diagnostics(reset = TRUE)
+  invisible(solve_gross_transitions(ft(c("A", "B"), c(10, 5)), ft(c("A", "B"), c(7, 8)), label = "step: R1, S1, 2030"))
+  expect_identical(ipf_diagnostics()$label, "step: R1, S1, 2030")
+  prior <- data.table::data.table(from_class = "A", to_class = "B", value = 0)
+  expect_warning(solve_gross_transitions(ft(c("A", "B"), c(10, 0)), ft(c("A", "B"), c(5, 5)), prior = prior, label = "R9"),
+                 "\\[R9\\]")
+  ipf_diagnostics(reset = TRUE)
+})

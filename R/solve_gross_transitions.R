@@ -105,6 +105,8 @@ fienberg <- function(start_mat, target_from, target_to,
 #' @param on_infeasible With `allowed`: `"stop"` (default) or `"warn"` when the margins
 #'   cannot be met on the allowed pairs. Without `allowed`, an infeasible support only warns.
 #' @param tol_margin Relative margin tolerance for the fit diagnostics.
+#' @param label Optional text identifying the fit (e.g. step, region, scenario, year),
+#'   recorded in [ipf_diagnostics()] and used in warnings.
 #'
 #' @return A `data.table` containing the solved transition flows with columns `from_class`,
 #'   `to_class`, and `value`. The fit diagnostics (feasibility, iterations, stop reason,
@@ -113,7 +115,9 @@ fienberg <- function(start_mat, target_from, target_to,
 #' @export
 solve_gross_transitions <- function(from_targets, to_targets, prior=NULL, keep_areas = "both",
                                     allowed = NULL, exempt_classes = "NODATA",
-                                    on_infeasible = c("stop", "warn"), tol_margin = 1e-6) {
+                                    on_infeasible = c("stop", "warn"), tol_margin = 1e-6, label = NULL) {
+  label <- if (is.null(label)) NA_character_ else as.character(label)[1]
+  at <- if (is.na(label)) "" else paste0(" [", label, "]")
   on_infeasible <- match.arg(on_infeasible)
   disallowed <- normalize_allowed_transitions(allowed, exempt_classes)
   require(data.table)
@@ -249,23 +253,23 @@ solve_gross_transitions <- function(from_targets, to_targets, prior=NULL, keep_a
   # Feasibility of the margins on the cells that may carry flow
   feas <- check_transport_feasibility(matA > 0, from_vec, to_vec)
   if (!feas$feasible) {
-    msg <- sprintf("solve_gross_transitions: margins cannot be met on the %s transitions (shortfall %.6g of %.6g).",
-                   if (is.null(disallowed)) "prior's" else "allowed", feas$shortfall, feas$total)
+    msg <- sprintf("solve_gross_transitions%s: margins cannot be met on the %s transitions (shortfall %.6g of %.6g).",
+                   at, if (is.null(disallowed)) "prior's" else "allowed", feas$shortfall, feas$total)
     if (!is.null(disallowed) && on_infeasible == "stop") stop(msg, call. = FALSE)
     warning(msg, call. = FALSE)
   }
 
   # Run fienberg rebalancing
   res <- fienberg(start_mat = matA, target_from = from_vec, target_to = to_vec, tol.margin = tol_margin)
-  diag_row <- data.table(n_from = length(from_vec), n_to = length(to_vec), n_disallowed = n_disallowed,
+  diag_row <- data.table(label = label, n_from = length(from_vec), n_to = length(to_vec), n_disallowed = n_disallowed,
                          feasible = feas$feasible, shortfall = feas$shortfall, iter = res$iter,
                          stop_reason = res$stop.reason, margin_error = res$margin_error, converged = res$converged)
   .record_ipf_fit(diag_row)
   if (!res$converged) {
     .ipf_registry$warned <- .ipf_registry$warned + 1L
     if (.ipf_registry$warned <= 10L) {
-      warning(sprintf("solve_gross_transitions: fit misses its margins (relative error %.3g after %d iterations; %s)%s",
-                      res$margin_error, res$iter, res$stop.reason,
+      warning(sprintf("solve_gross_transitions%s: fit misses its margins (relative error %.3g after %d iterations; %s)%s",
+                      at, res$margin_error, res$iter, res$stop.reason,
                       if (.ipf_registry$warned == 10L) " Further warnings suppressed; see ipf_diagnostics()." else ""),
               call. = FALSE)
     }
