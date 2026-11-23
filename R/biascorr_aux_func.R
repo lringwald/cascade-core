@@ -641,10 +641,119 @@ run_mopup_phase <- function(master_out_mu, curr_sol, active_targets, active_area
 # 5. MAIN ORCHESTRATOR
 # ==============================================================================
 
+#' Re-express a split relative to its largest label
+#'
+#' allocate_mnl() measures every target against an implicit "stay" option with
+#' odds 1. When a label is larger than what stays, and above all when nothing or
+#' almost nothing stays, the multipliers must become very large: IPF and the
+#' multi-target stage stop short, and the tempering loop then flattens the odds
+#' (raises them to 1/T). The model is a multinomial logit over the labels plus
+#' "stay", so any of its options can serve as the reference. When the largest
+#' unrestricted label is larger than "stay", this makes it the reference, keeps
+#' "stay" as an ordinary option (dropped when its target is zero) and divides all
+#' odds by the reference odds. The reference then receives the land that is left.
+#' This is the same model on a well-conditioned problem.
+#'
+#' @return NULL when "stay" is the largest option or no label can serve as the
+#'   reference (the general solver is used, unchanged), otherwise the re-expressed
+#'   problem.
 #' @keywords internal
 #' @noRd
-optim_allocation <- function(targets, priors, restrictions = NULL, pixel_avail, 
-                             type = c("lu", "pop"), areas = NULL, grid = NULL, 
+.reference_label_problem <- function(targets, priors, restrictions, areas, pixel_avail) {
+  total_area <- sum(areas[pixel_avail])
+  if (!(total_area > 0) || length(targets) == 0) return(NULL)
+  stay <- total_area - sum(targets)
+  if (stay < -1e-9 * total_area) return(NULL)
+  stay <- max(stay, 0)
+
+  p <- priors[pixel_avail, names(targets), drop = FALSE]
+  unrestricted <- if (is.null(restrictions)) rep(TRUE, length(targets)) else
+    colSums(is.na(restrictions[pixel_avail, names(targets), drop = FALSE]) |
+             restrictions[pixel_avail, names(targets), drop = FALSE] != 0) == 0
+  usable <- unrestricted & targets > 0 & colSums(!is.finite(p) | p <= 0) == 0
+  if (!any(usable)) return(NULL)
+  ref <- names(targets)[usable][which.max(targets[usable])]
+  if (targets[[ref]] <= stay) return(NULL)
+
+  others <- setdiff(names(targets), ref)
+  stay_name <- ".stay"
+  while (stay_name %in% names(targets)) stay_name <- paste0(stay_name, "_")
+  keep_stay <- stay > 1e-12 * total_area
+
+  log_ref <- log(p[, ref])
+  rel <- if (length(others)) log(p[, others, drop = FALSE]) - log_ref else NULL
+  if (keep_stay) rel <- cbind(rel, matrix(-log_ref, ncol = 1, dimnames = list(NULL, stay_name)))
+  if (!is.null(rel)) {
+    rel[] <- pmin(pmax(rel, log(1e-300)), 700)
+    rel <- exp(rel)
+    rownames(rel) <- pixel_avail
+  }
+
+  new_targets <- c(targets[others], if (keep_stay) stats::setNames(stay, stay_name))
+  new_restrictions <- NULL
+  if (!is.null(restrictions) && length(new_targets)) {
+    new_restrictions <- matrix(0, length(pixel_avail), length(new_targets),
+                               dimnames = list(pixel_avail, names(new_targets)))
+    if (length(others)) new_restrictions[, others] <- restrictions[pixel_avail, others]
+  }
+  list(ref = ref, stay_name = stay_name, targets = new_targets, priors = rel,
+       restrictions = new_restrictions)
+}
+
+#' @keywords internal
+#' @noRd
+.report_tempering <- function(res, current_lu_from, options) {
+  t_final <- res$solver_runs$final_tempering
+  if (!is.null(t_final) && t_final > 1) {
+    cli_alert_warning(paste0(
+      "{options$err.txt} {current_lu_from}: the solver did not converge at tempering 1 and used ",
+      "tempering {t_final}, which raises every odds to the power 1/{t_final} and weakens ",
+      "covariate effects. Set downscale_control(max_tempering = 1) to disable."))
+  }
+  res
+}
+
+#' @keywords internal
+#' @noRd
+optim_allocation <- function(targets, priors, restrictions = NULL, pixel_avail,
+                             type = c("lu", "pop"), areas = NULL, grid = NULL,
+                             current_lu_from = NULL, options = list()) {
+  type <- match.arg(type)
+  pixel_avail <- as.character(pixel_avail)
+  rp <- if (type == "lu" && !is.null(areas)) .reference_label_problem(targets, priors, restrictions, areas, pixel_avail) else NULL
+  if (is.null(rp)) {
+    res <- .optim_allocation_core(targets, priors, restrictions, pixel_avail, type, areas, grid, current_lu_from, options)
+    return(.report_tempering(res, current_lu_from, options))
+  }
+
+  if (length(rp$targets)) {
+    res <- .optim_allocation_core(rp$targets, rp$priors, rp$restrictions, pixel_avail, type, areas, grid, current_lu_from, options)
+    .report_tempering(res, current_lu_from, options)
+    inner_mu <- res$out_mu[pixel_avail, , drop = FALSE]
+    solver_runs <- res$solver_runs
+    inner_solution <- res$solution
+  } else {
+    inner_mu <- matrix(0, length(pixel_avail), 0, dimnames = list(pixel_avail, NULL))
+    solver_runs <- list(main = "Single label takes the whole area", final_tempering = 1)
+    inner_solution <- numeric(0)
+  }
+
+  out_mu <- matrix(0, length(pixel_avail), length(targets), dimnames = list(pixel_avail, names(targets)))
+  others <- setdiff(names(targets), rp$ref)
+  if (length(others)) out_mu[, others] <- inner_mu[, others]
+  out_mu[, rp$ref] <- pmax(areas[pixel_avail] - rowSums(inner_mu), 0)
+
+  solution <- stats::setNames(rep(NA_real_, length(targets)), names(targets))
+  if (length(others)) solution[others] <- inner_solution[others]
+  solver_runs$reference_label <- rp$ref
+  list(solution = solution, out_mu = out_mu, solver_runs = solver_runs,
+       summary = summarize_allocations(out_mu, targets))
+}
+
+#' @keywords internal
+#' @noRd
+.optim_allocation_core <- function(targets, priors, restrictions = NULL, pixel_avail,
+                             type = c("lu", "pop"), areas = NULL, grid = NULL,
                              current_lu_from = NULL, options = list()) {
   type <- match.arg(type)
   pixel_avail <- as.character(pixel_avail)
