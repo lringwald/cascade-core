@@ -319,17 +319,12 @@ solve_biascorr_lu     <- function(targets,
     curr_priors[ns_avail, setdiff(colnames(curr_priors_mu_hat),overlap_priors_cols)] <- curr_priors_mu_hat[ns_avail ,setdiff(colnames(curr_priors_mu_hat),overlap_priors_cols)]
     curr_priors[ns_avail, setdiff(colnames(curr_priors_mu_exo),overlap_priors_cols)] <- curr_priors_mu_exo[ns_avail ,setdiff(colnames(curr_priors_mu_exo),overlap_priors_cols)]
     
-    # Exponentiation
-    curr_priors <- exp(curr_priors) # e^U_Total
-    # Final Renormalization
-    # Denominator = 1 (for baseline e^U_Base) + sum(all e^U_Total)
-    # Calculate final transition probabilities: P_j = e^U_j / D_Total
-    curr_priors[is.na(curr_priors)] <- 0
-    curr_priors <- sweep(curr_priors,
-                         1, 
-                         rowSums(cbind(rep(1,nrow(curr_priors)),
-                                       curr_priors)), 
-                         "/")    
+    # Exponentiation: pass odds e^U_Total directly to allocate_mnl(),
+    # which applies the single MNL softmax (1 + sum_k x_k * e^U_k).
+    max_u <- if (!is.null(options$MAX_EXP)) min(options$MAX_EXP, 700) else 700
+    min_u <- if (!is.null(options$MIN_EXP) && options$MIN_EXP > 0) log(options$MIN_EXP) else log(1e-12)
+    curr_priors <- pmin(pmax(curr_priors, min_u), max_u)
+    curr_priors <- exp(curr_priors) # e^U_Total (odds)
     curr_priors[is.na(curr_priors)] <- 0
     
     # --- 5. Feasibility Checks (Diagnostics) ---
