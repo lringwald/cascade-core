@@ -15,6 +15,58 @@ PLCHOLD_SCEN = "__NA_SCEN__"
 # INTERNAL HELPERS
 # ------------------------------------------------------------------------------
 
+#' Complete exogenous priors with wildcards and check their classes
+#'
+#' An exogenous prior that does not name a source class, a destination class or a
+#' period applies to all of them: a missing `from_class` or `to_class` column, or an
+#' empty or NA value in it, becomes PLCHOLD_LU; a missing or empty `times` becomes
+#' PLCHOLD_T. The solver expands both wildcards (solve_biascorr_lu()). Without this,
+#' stacking the exogenous priors onto the model priors (rbind with fill) left NA in
+#' these columns, and the rows never matched a transition.
+#'
+#' Named classes that occur in no target are reported: such rows can never take
+#' effect (e.g. a class spelled differently from the legend).
+#' @return the completed data.table (character key columns)
+#' @keywords internal
+.complete_exo_priors <- function(exo, targets = NULL) {
+  if (is.null(exo) || !nrow(exo)) return(exo)
+  exo <- copy(as.data.table(exo))          # never modify the caller's table
+  if (!all(c("ns", "value") %in% names(exo)))
+    stop("exo_priors_all needs the columns `ns` and `value` (found: ", paste(names(exo), collapse = ", "), ").", call. = FALSE)
+  filled <- character()
+  for (col in c("from_class", "to_class", "times")) {
+    wild <- if (col == "times") PLCHOLD_T else PLCHOLD_LU
+    if (!col %in% names(exo)) {
+      exo[, (col) := wild]
+      filled <- c(filled, sprintf("%s (all rows: column missing)", col))
+    } else {
+      exo[, (col) := as.character(get(col))]
+      empty <- is.na(exo[[col]]) | !nzchar(trimws(exo[[col]]))
+      if (any(empty)) {
+        exo[empty, (col) := wild]
+        filled <- c(filled, sprintf("%s (%d of %d rows)", col, sum(empty), nrow(exo)))
+      }
+    }
+  }
+  if (length(filled))
+    message(sprintf("Exogenous priors: no %s given; applied to all (%s / %s): %s",
+                    "class or period", PLCHOLD_LU, PLCHOLD_T, paste(filled, collapse = "; ")))
+  if (!is.null(targets) && all(c("from_class", "to_class") %in% names(targets))) {
+    known <- unique(c(as.character(targets$from_class), as.character(targets$to_class)))
+    named <- setdiff(unique(c(exo$from_class, exo$to_class)), PLCHOLD_LU)
+    unknown <- setdiff(named, known)
+    if (length(unknown)) {
+      n_rows <- exo[from_class %in% unknown | to_class %in% unknown, .N]
+      warning(sprintf(paste0("Exogenous priors name %d class(es) that occur in no target, so %d of %d rows ",
+                             "can never take effect: %s"),
+                      length(unknown), n_rows, nrow(exo), paste(utils::head(sort(unknown), 10), collapse = ", ")),
+              call. = FALSE)
+    }
+  }
+  exo
+}
+# ------------------------------------------------------------------------------
+
 #' Check Data.Table Integrity
 #' @keywords internal
 check_dt_integrity <- function(dt, nm, required_cols, err_txt = "", allow_na = FALSE) {
