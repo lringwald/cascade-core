@@ -19,7 +19,11 @@ require(progress)
 #' @param xmat_full Optional `data.table` of static spatially explicit explanatory variables.
 #' @param xmat_proj_full Optional `data.table` of dynamic projected explanatory variables over time.
 #' @param betas_full Optional `data.table` of transition coefficients matching `xmat`.
-#' @param exo_priors_all Optional `data.table` of exogenous spatial priors (e.g., policy constraints).
+#' @param exo_priors_all Optional `data.table` of exogenous spatial priors (e.g., policy constraints):
+#'   `ns`, `value`, and optionally `from_class`, `to_class`, `times`. A missing or empty source
+#'   class, destination class or period applies the prior to all of them (`__NA_LU__`,
+#'   `__NA_TIME__`). Classes that occur in no target are reported with a warning. Exogenous and
+#'   model priors are combined by their maximum per pixel and transition.
 #' @param region_cols Character vector specifying the spatial region grouping columns.
 #' @param scen_cols Character string specifying the scenario column.
 #' @param time_col Character string specifying the timestep column.
@@ -341,6 +345,8 @@ execute_luc_downscaling <- function(
   if (pixel_id_col %in% names(start_map)) setnames(start_map, pixel_id_col, "ns")
   if (!is.null(priors) && pixel_id_col %in% names(priors)) setnames(priors, pixel_id_col, "ns")
   if (!is.null(exo_priors_all) && pixel_id_col %in% names(exo_priors_all)) setnames(exo_priors_all, pixel_id_col, "ns")
+  # A prior without a source class, destination class or period applies to all of them
+  exo_priors_all <- .complete_exo_priors(exo_priors_all, targets)
 
   # Mock mappings expected by engine
   mappings <- list(mapping_grid = mapping_grid)
