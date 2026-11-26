@@ -128,6 +128,19 @@ downscale <- function(targets,
   # 5. Iteration Loop
   for (curr_time in run_times) {
     missing_luc = NULL
+
+    # Projected (exogenous) covariates are CONTEMPORANEOUS with the period being solved: the
+    # prior models are fit on covariates of the outcome year (gamble-core DRIVER_COV_YEARS), so
+    # the solve for curr_time uses xmat_proj[times == curr_time]. They used to be swapped in
+    # after the solve, i.e. one period late. Dynamic (land-use) covariates are the start-of-
+    # period state and are still updated after each solve (below).
+    if (!is.null(xmat_proj) && !is.null(proj_colnames)) {
+      tmp_proj = xmat_proj[times == curr_time & ks %in% proj_colnames]
+      if (nrow(tmp_proj) == 0) stop(sprintf("%s: no xmat_proj rows for time %s", options$err.txt, curr_time))
+      setnames(tmp_proj, "value", "proj")
+      curr_xmat[tmp_proj, on = .(ns, ks), value := fifelse(!is.na(proj), proj, value)]
+      setnames(tmp_proj, "proj", "value")
+    }
     
     valid_targets_lu <- unique(targets[times == curr_time, from_class])
     
@@ -166,14 +179,6 @@ downscale <- function(targets,
     
     # Update current areas
     curr_areas = areas_update_fun(res$out_res, curr_areas, priors, xmat_proj)
-    # Update projected xmats
-    if (!is.null(xmat_proj) && !is.null(proj_colnames)) {
-      tmp_proj = xmat_proj[times == curr_time]
-      setnames(tmp_proj, "value", "proj")
-      curr_xmat[tmp_proj, on = .(ns, ks), value := fifelse(!is.na(proj), proj, value)]
-      setnames(tmp_proj, "proj", "value")
-    }
-    
     # Update dynamic xmats
     if (!is.null(dyn_colnames)) {
       tmp_dyn = xmat_dyn_fun(res, curr_areas, priors, xmat, xmat_proj)

@@ -607,6 +607,16 @@ for (iter in seq_len(nrow(ds_grid))) {
     } else {
       NULL
     }
+    # Covariates with projection rows become "projected" (exogenous, swapped in per period);
+    # land-use covariates stay "dynamic" (carried forward from the solve itself) even if a
+    # projection table lists them.
+    if (!is.null(xmat_proj_region) && nrow(xmat_proj_region) > 0) {
+      proj_ks <- intersect(unique(as.character(xmat_proj_region$ks)), xmat_coltype[value == "static", ks])
+      xmat_coltype[ks %in% proj_ks, value := "projected"]
+      xmat_proj_region <- if (length(proj_ks)) xmat_proj_region[ks %in% proj_ks, .(ns, ks, times = as.character(times), value)] else NULL
+    } else {
+      xmat_proj_region <- NULL
+    }
     
     # Subset betas if they are region-specific. Exact keys first; then the hierarchical
     # fallback, which is what lets a country-keyed prior serve finer regions (see
@@ -821,7 +831,7 @@ for (iter in seq_len(nrow(ds_grid))) {
     xmat          = xmat_region,
     xmat_coltypes = xmat_coltype,
     xmat_dyn_fun = xmat_share_to,
-    #xmat_proj    = xmat_proj_region,
+    xmat_proj     = xmat_proj_region,
     betas = if (is.null(betas_region) || nrow(betas_region) == 0) NULL else betas_region,
     options       = downscale_control(
       mode = if (exists("DOWNSCALE_MODE")) DOWNSCALE_MODE else "exact",
